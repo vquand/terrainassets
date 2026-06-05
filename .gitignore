@@ -1,3 +1,40 @@
+# Dependencies
 node_modules/
+
+# Build output
+dist/
+build/
+out/
+coverage/
+*.tsbuildinfo
+
+# Package manager logs
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Tool caches
+.cache/
+.parcel-cache/
+.turbo/
+.vite/
+
+# Local debug artifacts
+debug/
+debug-output/
+*.debug.html
+terrain-debug*.html
+*.cpuprofile
+*.heapsnapshot
+
+# Editor and OS files
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/

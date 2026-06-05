@@ -113,6 +113,7 @@ export interface RoadTile {
 }
 
 export type TopologyMode = "full" | "land" | "sea";
+export type TileShape = "hex" | "square";
 export type WeatherType = "STORM" | "SNOW" | "VOLCANO" | "SWAMP";
 
 export interface LayerSeeds {
@@ -130,6 +131,14 @@ export interface GenerateMapOptions {
   readonly depth?: number;
   /** full = sea + land + weather, land = land-only, sea = sea-only. */
   readonly topology?: TopologyMode;
+  /** Debug/render tile geometry. Default hex. */
+  readonly tileShape?: TileShape;
+  /** Target road-overlay tiles divided by total land tiles. Default 0.0964285714. */
+  readonly roadDensity?: number;
+  /** Fraction of sea cells that become blocked deep sea. Default 0.2. */
+  readonly blockedSeaRatio?: number;
+  /** Fraction of land cells that become blocked cliffs/mountains. Default 0.1. */
+  readonly blockedLandRatio?: number;
   /** Maximum special-weather surface coverage, as a fraction of total cells. Default 0.25. */
   readonly weatherCoverageLimit?: number;
   /** Optional per-step seed overrides. Missing seeds are derived from the root seed. */
@@ -145,6 +154,7 @@ export interface MapGenerationDebugCell {
   readonly layer: number;
   readonly weather?: WeatherType;
   readonly road: boolean;
+  readonly roadTile?: RoadTile;
 }
 
 export interface MapGenerationDebugStep {
@@ -158,6 +168,7 @@ export interface MapGenerationDebugStep {
 export interface MapGenerationDebug {
   readonly seeds: LayerSeeds;
   readonly seaRatio: number;
+  readonly tileShape: TileShape;
   readonly steps: readonly MapGenerationDebugStep[];
 }
 
@@ -190,6 +201,8 @@ export interface GameMap {
   readonly layerSeeds: LayerSeeds;
   readonly depth: number;
   readonly topology: TopologyMode;
+  readonly tileShape: TileShape;
+  readonly roadDensity: number;
   /** Scenario preset id when the map came from a hand-authored layout. */
   readonly preset?: string;
   readonly width: number;
@@ -339,12 +352,19 @@ const inBoundsOf = (width: number, height: number, col: number, row: number) =>
   col >= 0 && row >= 0 && col < width && row < height;
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 const DEFAULT_SEA_RATIO = 0.3;
+const DEFAULT_BLOCKED_SEA_RATIO = 0.2;
+const DEFAULT_BLOCKED_LAND_RATIO = 0.1;
+const DEFAULT_ROAD_DENSITY = 0.09642857142857142;
 
 interface ResolvedGenerateMapOptions {
   readonly width: number;
   readonly height: number;
   readonly depth: number;
   readonly topology: TopologyMode;
+  readonly tileShape: TileShape;
+  readonly roadDensity: number;
+  readonly blockedSeaRatio: number;
+  readonly blockedLandRatio: number;
   readonly weatherCoverageLimit: number;
   readonly seeds: LayerSeeds;
   readonly debug: boolean;
@@ -374,6 +394,10 @@ function resolveGenerateMapOptions(
     height: Math.max(1, Math.round(height ?? raw?.height ?? 500)),
     depth: Math.max(2, Math.round(raw?.depth ?? 4)),
     topology: raw?.topology ?? "full",
+    tileShape: raw?.tileShape ?? "hex",
+    roadDensity: clamp01(raw?.roadDensity ?? DEFAULT_ROAD_DENSITY),
+    blockedSeaRatio: clamp01(raw?.blockedSeaRatio ?? DEFAULT_BLOCKED_SEA_RATIO),
+    blockedLandRatio: clamp01(raw?.blockedLandRatio ?? DEFAULT_BLOCKED_LAND_RATIO),
     weatherCoverageLimit: clamp01(raw?.weatherCoverageLimit ?? 0.25),
     seeds: deriveSeeds(seed, raw?.seeds),
     debug: raw?.debug ?? false,
@@ -450,6 +474,7 @@ function captureDebugStep(
   title: string,
   description: string,
   seed: number,
+  roadTiles?: ReadonlyMap<string, RoadTile>,
 ): void {
   if (!state.debugSteps) return;
   const cells: MapGenerationDebugCell[] = [];
@@ -457,12 +482,15 @@ function captureDebugStep(
     for (let col = 0; col < state.width; col++) {
       const i = idxOf(state.width, col, row);
       const weather = state.weather[i];
+      const key = `${col},${row}`;
+      const roadTile = roadTiles?.get(key);
       cells.push({
         col,
         row,
         terrain: state.terrain[i]!,
         layer: state.layer[i]!,
-        road: state.terrain[i] === "ROCK_ROAD",
+        road: roadTile !== undefined || state.roadConnections.has(key),
+        ...(roadTile ? { roadTile } : {}),
         ...(weather ? { weather } : {}),
       });
     }
@@ -492,9 +520,14 @@ function directionBetween(from: Hex, to: Hex): number | undefined {
   return undefined;
 }
 
-function addRoadPath(state: MapGenerationState, path: readonly Hex[], widenChance: number): void {
-  const { rng, width, height, terrain, layer } = state;
+function addRoadPath(state: MapGenerationState, path: readonly Hex[]): void {
+  addRoadPathUntil(state, path, Number.POSITIVE_INFINITY);
+}
+
+function addRoadPathUntil(state: MapGenerationState, path: readonly Hex[], targetRoadTiles: number): void {
+  const { width, height, layer } = state;
   for (let i = 0; i < path.length; i++) {
+    if (state.roadConnections.size >= targetRoadTiles) return;
     const cell = path[i]!;
     if (!inBoundsOf(width, height, cell.col, cell.row)) continue;
     if (!isRoadPassableLayer(layer[idxOf(width, cell.col, cell.row)]!)) continue;
@@ -508,16 +541,6 @@ function addRoadPath(state: MapGenerationState, path: readonly Hex[], widenChanc
         continue;
       }
       connectRoad(state, prev, cell);
-    }
-    terrain[idxOf(width, cell.col, cell.row)] = "ROCK_ROAD";
-
-    for (const n of neighbors(cell)) {
-      if (!inBoundsOf(width, height, n.col, n.row)) continue;
-      const ni = idxOf(width, n.col, n.row);
-      if (!isRoadPassableLayer(layer[ni]!) || Math.abs(layer[ni]! - layer[idxOf(width, cell.col, cell.row)]!) > 1) {
-        continue;
-      }
-      if (rng.next() < widenChance) terrain[ni] = "ROCK_ROAD";
     }
   }
 }
@@ -563,40 +586,67 @@ function generateLandAndSeaMask(
   return { terrain, layer, elevation, weather, seaRatio };
 }
 
-function fillSeaLayers(state: MapGenerationState, seed: number): void {
+function fillSeaLayers(state: MapGenerationState, seed: number, blockedSeaRatio: number): void {
   const { width, height, terrain, layer, elevation } = state;
-  let seaCount = 0;
-  for (const value of layer) if (isSeaLayer(value)) seaCount++;
-  if (seaCount === 0) return;
+  const seaScores: { index: number; value: number }[] = [];
 
   for (let row = 0; row < height; row++) {
     for (let col = 0; col < width; col++) {
       const i = idxOf(width, col, row);
       if (!isSeaLayer(layer[i]!)) continue;
-      const depthNoise = perlinNoise(col / 22, row / 22, seed, 4, 0.58);
-      const blocked = depthNoise > 0.74;
-      layer[i] = blocked ? -9 : -1;
+      seaScores.push({
+        index: i,
+        value: perlinNoise(col / 22, row / 22, seed, 4, 0.58),
+      });
+      layer[i] = -1;
       elevation[i] = 0;
-      terrain[i] = blocked ? "SEA" : "SHALLOW_WATER";
+      terrain[i] = "SHALLOW_WATER";
     }
+  }
+
+  if (seaScores.length === 0) return;
+  const blockedTarget = Math.round(seaScores.length * blockedSeaRatio);
+  if (blockedTarget === 0) return;
+
+  seaScores.sort((a, b) => b.value - a.value || a.index - b.index);
+  for (let i = 0; i < blockedTarget; i++) {
+    const index = seaScores[i]!.index;
+    layer[index] = -9;
+    terrain[index] = "SEA";
   }
 }
 
-function fillLandLayers(state: MapGenerationState, seed: number, depth: number): void {
+function fillLandLayers(state: MapGenerationState, seed: number, depth: number, blockedLandRatio: number): void {
   const { width, height, terrain, layer, elevation } = state;
-  let landCount = 0;
-  for (const value of layer) if (!isSeaLayer(value)) landCount++;
-  if (landCount === 0) return;
+  const landScores: { index: number; value: number }[] = [];
+  const heightScores: number[] = new Array(width * height);
+
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
+      const i = idxOf(width, col, row);
+      if (isSeaLayer(layer[i]!)) continue;
+      const heightNoise = perlinNoise(col / 18, row / 18, seed, 5, 0.54);
+      heightScores[i] = heightNoise;
+      landScores.push({ index: i, value: heightNoise });
+    }
+  }
+  if (landScores.length === 0) return;
+
+  const blockedTarget = Math.round(landScores.length * blockedLandRatio);
+  const blockedLand = new Set<number>();
+  if (blockedTarget > 0) {
+    landScores.sort((a, b) => b.value - a.value || a.index - b.index);
+    for (let i = 0; i < blockedTarget; i++) blockedLand.add(landScores[i]!.index);
+  }
 
   const maxWalkableLayer = Math.max(1, depth - 1);
   for (let row = 0; row < height; row++) {
     for (let col = 0; col < width; col++) {
       const i = idxOf(width, col, row);
       if (isSeaLayer(layer[i]!)) continue;
-      const heightNoise = perlinNoise(col / 18, row / 18, seed, 5, 0.54);
+      const heightNoise = heightScores[i]!;
       const moisture = perlinNoise(col / 15, row / 15, seed + 1000, 3, 0.6);
-      const blocked = heightNoise > 0.9;
-      const landLayer = blocked
+      const landLayer = blockedLand.has(i)
         ? 9
         : Math.min(maxWalkableLayer, 1 + Math.floor(heightNoise * maxWalkableLayer));
       layer[i] = landLayer;
@@ -688,6 +738,12 @@ function roadCandidates(state: MapGenerationState, minCol: number, maxCol: numbe
   return out;
 }
 
+function countLandTiles(state: MapGenerationState): number {
+  let count = 0;
+  for (const value of state.layer) if (value > 0) count++;
+  return count;
+}
+
 function drawRoads(state: MapGenerationState): Hex[][] {
   const { rng, width, height, layer } = state;
   const paths: Hex[][] = [];
@@ -704,7 +760,7 @@ function drawRoads(state: MapGenerationState): Hex[][] {
     const end = right[(p * 7 + rng.int(0, right.length - 1)) % right.length]!;
     const path = findRoadPath(state, start, end);
     if (path.length === 0) continue;
-    addRoadPath(state, path, 0.7);
+    addRoadPath(state, path);
     paths.push(path);
   }
 
@@ -721,10 +777,28 @@ function drawRoads(state: MapGenerationState): Hex[][] {
       if (!inBoundsOf(width, height, cell.col, cell.row)) return false;
       return isRoadPassableLayer(layer[idxOf(width, cell.col, cell.row)]!);
     });
-    addRoadPath(state, connector, 0.6);
+    addRoadPath(state, connector);
   }
 
   return paths;
+}
+
+function ensureRoadDensity(state: MapGenerationState, paths: Hex[][], targetRoadTiles: number): void {
+  if (targetRoadTiles <= state.roadConnections.size) return;
+  const { rng, width } = state;
+  const left = rng.shuffle(roadCandidates(state, 0, Math.min(width - 1, Math.ceil(width * 0.15))));
+  const right = rng.shuffle(roadCandidates(state, Math.max(0, Math.floor(width * 0.85)), width - 1));
+  if (left.length === 0 || right.length === 0) return;
+
+  const maxAttempts = Math.max(8, Math.ceil(targetRoadTiles / Math.max(1, width)) * 4);
+  for (let attempt = 0; attempt < maxAttempts && state.roadConnections.size < targetRoadTiles; attempt++) {
+    const start = left[(attempt * 5 + rng.int(0, left.length - 1)) % left.length]!;
+    const end = right[(attempt * 7 + rng.int(0, right.length - 1)) % right.length]!;
+    const path = findRoadPath(state, start, end);
+    if (path.length <= 1) continue;
+    addRoadPathUntil(state, path, targetRoadTiles);
+    paths.push(path);
+  }
 }
 
 function drawPortalRoads(state: MapGenerationState, portals: readonly Portal[], capitol: Hex): Hex[][] {
@@ -754,7 +828,7 @@ function drawPortalRoads(state: MapGenerationState, portals: readonly Portal[], 
 
     waypoints.push(capitol);
     const road = joinWaypoints(waypoints);
-    addRoadPath(state, road, 0.35);
+    addRoadPath(state, road);
     roads.push(road);
   }
   return roads;
@@ -884,8 +958,7 @@ function buildRoadTiles(state: MapGenerationState): Map<string, RoadTile> {
       row === undefined ||
       !Number.isFinite(col) ||
       !Number.isFinite(row) ||
-      !inBoundsOf(state.width, state.height, col, row) ||
-      state.terrain[idxOf(state.width, col, row)] !== "ROCK_ROAD"
+      !inBoundsOf(state.width, state.height, col, row)
     ) {
       continue;
     }
@@ -933,7 +1006,18 @@ export function generateMap(
   options?: GenerateMapOptions,
 ): GameMap {
   const resolved = resolveGenerateMapOptions(seed, widthOrOptions, height, options);
-  const { width, height: mapHeight, depth, topology, weatherCoverageLimit, seeds } = resolved;
+  const {
+    width,
+    height: mapHeight,
+    depth,
+    topology,
+    tileShape,
+    roadDensity,
+    blockedSeaRatio,
+    blockedLandRatio,
+    weatherCoverageLimit,
+    seeds,
+  } = resolved;
   const rng = new Rng(seeds.road);
   const { terrain, layer, elevation, weather, seaRatio } = generateLandAndSeaMask(
     seeds.ratio,
@@ -960,20 +1044,20 @@ export function generateMap(
     "Seeded mask stage: sea cells are light blue and land cells are light gray before sprites or passability are assigned.",
     seeds.ratio,
   );
-  fillSeaLayers(state, seeds.sea);
+  fillSeaLayers(state, seeds.sea, blockedSeaRatio);
   captureDebugStep(
     state,
     "sea-passability",
     "Sea passability",
-    "Sea stage: swimmable sea is layer -1 and blocked sea is layer -9.",
+    "Sea stage: swimmable sea is layer -1 and blocked sea is layer -9. Blocked sea is selected as a configured share of existing sea cells.",
     seeds.sea,
   );
-  fillLandLayers(state, seeds.land, depth);
+  fillLandLayers(state, seeds.land, depth, blockedLandRatio);
   captureDebugStep(
     state,
     "land-levels",
     "Land levels",
-    "Land stage: walkable land uses layers 1..3 by default and blocked cliffs or mountains use layer 9.",
+    "Land stage: walkable land uses layers 1..3 by default and blocked cliffs or mountains use layer 9. Blocked land is selected as a configured share of existing land cells.",
     seeds.land,
   );
   fillWeather(state, seeds.weather, weatherCoverageLimit);
@@ -984,6 +1068,7 @@ export function generateMap(
     "Weather stage: special weather overlays are capped by the configured total-surface coverage limit.",
     seeds.weather,
   );
+  const targetRoadTiles = Math.round(countLandTiles(state) * roadDensity);
   const paths = drawRoads(state);
   const idx = (col: number, row: number) => idxOf(width, col, row);
   const inBounds = (col: number, row: number) => inBoundsOf(width, mapHeight, col, row);
@@ -1028,6 +1113,7 @@ export function generateMap(
   const portals = generatePortals(rng, width, mapHeight, layer, idx);
   const portalRoads = drawPortalRoads(state, portals, mainPath[mainPath.length - 1]!);
   paths.push(...portalRoads);
+  ensureRoadDensity(state, paths, targetRoadTiles);
   captureDebugStep(
     state,
     "roads",
@@ -1036,6 +1122,14 @@ export function generateMap(
     seeds.road,
   );
   const roadTiles = buildRoadTiles(state);
+  captureDebugStep(
+    state,
+    "sprite-fill",
+    "Sprite fill",
+    "Sprite stage: final terrain codes are ready for terrain sprite lookup and road overlay variants are resolved for rendering.",
+    seeds.road,
+    roadTiles,
+  );
 
   // Assemble cells.
   const cells: MapCell[] = [];
@@ -1071,6 +1165,8 @@ export function generateMap(
     layerSeeds: seeds,
     depth,
     topology,
+    tileShape,
+    roadDensity,
     width,
     height: mapHeight,
     cells,
@@ -1079,7 +1175,7 @@ export function generateMap(
     spawn: mainPath[0]!,
     capitol: mainPath[mainPath.length - 1]!,
     portals,
-    ...(debugSteps ? { debug: { seeds, seaRatio, steps: debugSteps } } : {}),
+    ...(debugSteps ? { debug: { seeds, seaRatio, tileShape, steps: debugSteps } } : {}),
   };
 }
 
@@ -1112,7 +1208,7 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     body { margin: 0; font-family: system-ui, sans-serif; color: #1f2933; background: #f7f8fa; }
     header { padding: 16px 20px; border-bottom: 1px solid #d8dee4; background: #fff; }
     .topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-    .actions { display: flex; gap: 8px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
     main { display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 73px); }
     nav { padding: 12px; border-right: 1px solid #d8dee4; background: #fff; overflow: auto; }
     button { padding: 10px 12px; border: 1px solid #c8d0d9; border-radius: 6px; background: #fff; cursor: pointer; }
@@ -1121,7 +1217,8 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     .nav-actions button { margin: 0; text-align: center; font-weight: 600; }
     button.active { border-color: #2364aa; box-shadow: inset 3px 0 0 #2364aa; }
     section { padding: 16px; overflow: auto; }
-    canvas { image-rendering: pixelated; width: 100%; max-width: 1400px; background: #fff; border: 1px solid #d8dee4; }
+    .viewport { max-width: 100%; overflow: auto; }
+    canvas { image-rendering: pixelated; background: #fff; border: 1px solid #d8dee4; }
     p { max-width: 900px; line-height: 1.45; }
     .meta { color: #52606d; font-size: 13px; }
     .seed-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
@@ -1136,6 +1233,7 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
         <div class="meta" id="meta"></div>
       </div>
       <div class="actions">
+        <button type="button" id="zoomToggle">Zoom: Fit</button>
         <button type="button" id="regenerate">Re-gen current</button>
         <button type="button" id="reroll">Reroll</button>
       </div>
@@ -1154,7 +1252,9 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       <h1 id="title"></h1>
       <div class="step-seed" id="stepSeed"></div>
       <p id="description"></p>
-      <canvas id="map"></canvas>
+      <div class="viewport">
+        <canvas id="map"></canvas>
+      </div>
     </section>
   </main>
   <script>
@@ -1179,6 +1279,7 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     const meta = document.getElementById("meta");
     const seedList = document.getElementById("seedList");
     const stepSeed = document.getElementById("stepSeed");
+    const zoomToggle = document.getElementById("zoomToggle");
     const regenerate = document.getElementById("regenerate");
     const reroll = document.getElementById("reroll");
     const regenerateNav = document.getElementById("regenerateNav");
@@ -1187,11 +1288,33 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     const description = document.getElementById("description");
     const canvas = document.getElementById("map");
     const ctx = canvas.getContext("2d");
-    canvas.width = DATA.width;
-    canvas.height = DATA.height;
+    const tileShape = DATA.debug.tileShape ?? "hex";
+    let zoomMode = "fit";
+    let activeStepIndex = 0;
+    let hexRadius = 1;
+    let hexWidth = 1;
+    let hexHeight = 1;
+    let squareSize = 1;
+
+    function configureCanvas() {
+      const fitWidth = 1024;
+      const fitSquare = Math.max(1, Math.min(8, Math.floor(fitWidth / DATA.width)));
+      squareSize = zoomMode === "tile30" ? 30 : fitSquare;
+      hexRadius = zoomMode === "tile30" ? 15 : Math.max(1.5, Math.min(8, fitWidth / DATA.width));
+      hexWidth = Math.sqrt(3) * hexRadius;
+      hexHeight = 2 * hexRadius;
+      if (tileShape === "hex") {
+        canvas.width = Math.ceil((DATA.width + 0.5) * hexWidth);
+        canvas.height = Math.ceil((DATA.height * 1.5 + 0.5) * hexRadius);
+      } else {
+        canvas.width = DATA.width * squareSize;
+        canvas.height = DATA.height * squareSize;
+      }
+    }
+    configureCanvas();
     const params = new URLSearchParams(window.location.search);
     const rootSeed = params.get("seed") ?? "12345";
-    meta.textContent = \`Root seed \${rootSeed} | Sea ratio \${Math.round(DATA.debug.seaRatio * 100)}% | Size \${DATA.width} x \${DATA.height}\`;
+    meta.textContent = \`Root seed \${rootSeed} | Shape \${tileShape} | Sea ratio \${Math.round(DATA.debug.seaRatio * 100)}% | Size \${DATA.width} x \${DATA.height}\`;
     for (const [name, value] of Object.entries(DATA.debug.seeds)) {
       const item = document.createElement("span");
       item.textContent = \`\${name}: \${value}\`;
@@ -1212,6 +1335,12 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     regenerateNav.addEventListener("click", regenerateCurrent);
     reroll.addEventListener("click", rerollSeed);
     rerollNav.addEventListener("click", rerollSeed);
+    zoomToggle.addEventListener("click", () => {
+      zoomMode = zoomMode === "fit" ? "tile30" : "fit";
+      zoomToggle.textContent = zoomMode === "fit" ? "Zoom: Fit" : "Zoom: 30px";
+      configureCanvas();
+      void showStep(activeStepIndex);
+    });
 
     function colorFor(cell) {
       if (cell.road) return colors.ROCK_ROAD;
@@ -1222,21 +1351,113 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       return colors.GRASSLAND;
     }
 
-    function showStep(index) {
+    function spritePathFor(cell) {
+      const name = cell.terrain.toLowerCase().replace(/_/g, "-");
+      return \`/sprites/terrain/simplified/\${name}.png\`;
+    }
+
+    function roadSpritePathFor(cell) {
+      if (!cell.roadTile) return null;
+      return \`/sprites/terrain/rock-road/\${cell.roadTile.variant}-r\${cell.roadTile.rotation}.png\`;
+    }
+
+    const spriteCache = new Map();
+    function loadSprite(src) {
+      let cached = spriteCache.get(src);
+      if (cached) return cached;
+      cached = new Promise((resolve) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => resolve(null);
+        image.src = src;
+      });
+      spriteCache.set(src, cached);
+      return cached;
+    }
+
+    function drawHexCell(cell, color) {
+      const cx = hexWidth * (cell.col + 0.5 * (cell.row & 1)) + hexWidth / 2;
+      const cy = hexRadius + cell.row * hexRadius * 1.5;
+      ctx.beginPath();
+      for (let side = 0; side < 6; side++) {
+        const angle = Math.PI / 180 * (60 * side - 30);
+        const x = cx + hexRadius * Math.cos(angle);
+        const y = cy + hexRadius * Math.sin(angle);
+        if (side === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
+
+    function drawSquareCell(cell, color) {
+      ctx.fillStyle = color;
+      ctx.fillRect(cell.col * squareSize, cell.row * squareSize, squareSize, squareSize);
+    }
+
+    function clipHexCell(cell) {
+      const cx = hexWidth * (cell.col + 0.5 * (cell.row & 1)) + hexWidth / 2;
+      const cy = hexRadius + cell.row * hexRadius * 1.5;
+      ctx.beginPath();
+      for (let side = 0; side < 6; side++) {
+        const angle = Math.PI / 180 * (60 * side - 30);
+        const x = cx + hexRadius * Math.cos(angle);
+        const y = cy + hexRadius * Math.sin(angle);
+        if (side === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      return { x: cx - hexWidth / 2, y: cy - hexHeight / 2, width: hexWidth, height: hexHeight };
+    }
+
+    async function drawSpriteCell(cell) {
+      const baseImage = await loadSprite(spritePathFor(cell));
+      if (!baseImage) {
+        const color = colorFor(cell);
+        if (tileShape === "hex") drawHexCell(cell, color);
+        else drawSquareCell(cell, color);
+      } else if (tileShape === "hex") {
+        const box = clipHexCell(cell);
+        ctx.save();
+        ctx.clip();
+        ctx.drawImage(baseImage, box.x, box.y, box.width, box.height);
+        ctx.restore();
+      } else {
+        ctx.drawImage(baseImage, cell.col * squareSize, cell.row * squareSize, squareSize, squareSize);
+      }
+
+      const roadPath = roadSpritePathFor(cell);
+      if (!roadPath) return;
+      const roadImage = await loadSprite(roadPath);
+      if (!roadImage) return;
+      if (tileShape === "hex") {
+        const box = clipHexCell(cell);
+        ctx.save();
+        ctx.clip();
+        ctx.drawImage(roadImage, box.x, box.y, box.width, box.height);
+        ctx.restore();
+      } else {
+        ctx.drawImage(roadImage, cell.col * squareSize, cell.row * squareSize, squareSize, squareSize);
+      }
+    }
+
+    async function showStep(index) {
+      activeStepIndex = index;
       const step = DATA.debug.steps[index];
       title.textContent = step.title;
       stepSeed.textContent = \`Step seed: \${step.seed}\`;
       description.textContent = step.description;
-      const image = ctx.createImageData(DATA.width, DATA.height);
-      for (const cell of step.cells) {
-        const hex = colorFor(cell).slice(1);
-        const offset = (cell.row * DATA.width + cell.col) * 4;
-        image.data[offset] = parseInt(hex.slice(0, 2), 16);
-        image.data[offset + 1] = parseInt(hex.slice(2, 4), 16);
-        image.data[offset + 2] = parseInt(hex.slice(4, 6), 16);
-        image.data[offset + 3] = 255;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (step.id === "sprite-fill") {
+        await Promise.all(step.cells.map((cell) => drawSpriteCell(cell)));
+      } else {
+        for (const cell of step.cells) {
+          const color = colorFor(cell);
+          if (tileShape === "hex") drawHexCell(cell, color);
+          else drawSquareCell(cell, color);
+        }
       }
-      ctx.putImageData(image, 0, 0);
       for (const button of nav.querySelectorAll("button")) button.classList.remove("active");
       nav.querySelector(\`button[data-index="\${index}"]\`).classList.add("active");
     }
