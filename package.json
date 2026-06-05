@@ -1,0 +1,18 @@
+{
+  "name": "@vquand/terrainassets",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./hex": "./src/hex.ts",
+    "./mapgen": "./src/mapgen.ts",
+    "./rng": "./src/rng.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}
