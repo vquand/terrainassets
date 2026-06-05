@@ -102,9 +102,12 @@ per-stage seeds unless a caller passes explicit seed overrides.
 
    The land seed assigns land cells to walkable layers and blocked terrain.
    Default depth `4` produces walkable land layers `1`, `2`, and `3`, plus layer
-   `9` for non-walkable cliffs or high mountains. By default, blocked land
-   covers `10%` of cells that were already selected as land, not `10%` of the
-   whole map. If the topology contains no land, this stage has no effect.
+   `9` for non-walkable cliffs or high mountains. The three walkable land
+   heights are named in the generated cell data as `plain` (layer `1`, đồng
+   bằng), `hill` (layer `2`, trung du đồi núi), and `plateau` (layer `3`, cao
+   nguyên). By default, blocked land covers `10%` of cells that were already
+   selected as land, not `10%` of the whole map. If the topology contains no
+   land, this stage has no effect.
 
 4. Weather
 
@@ -173,4 +176,9 @@ http://localhost:5999/?seed=12345&width=120&height=60&depth=4&topology=full&tile
 The debug page displays the root seed, every per-step derived seed, and the seed
 used by each individual generation step. Use `Regenerate` to reload the current
 seed, `Reroll` to update the URL with a new root seed, and the zoom toggle to
-switch between fit-to-view and 30px-per-tile rendering.
+switch between fit-to-view and 60px-per-tile rendering. In the land and sprite
+views, higher walkable land levels are drawn slightly raised with a brown side
+wall. A bold border is drawn only on the raised tile's top surface where it
+meets a lower adjacent land tile. The two lower/front hex edges are skipped
+because the brown elevated wall already communicates that drop, and the brown
+wall itself is not highlighted.

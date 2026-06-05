@@ -114,6 +114,7 @@ export interface RoadTile {
 
 export type TopologyMode = "full" | "land" | "sea";
 export type TileShape = "hex" | "square";
+export type LandHeight = "plain" | "hill" | "plateau";
 export type WeatherType = "STORM" | "SNOW" | "VOLCANO" | "SWAMP";
 
 export interface LayerSeeds {
@@ -152,6 +153,7 @@ export interface MapGenerationDebugCell {
   readonly row: number;
   readonly terrain: string;
   readonly layer: number;
+  readonly landHeight?: LandHeight;
   readonly weather?: WeatherType;
   readonly road: boolean;
   readonly roadTile?: RoadTile;
@@ -179,6 +181,8 @@ export interface MapCell {
   terrain: string;
   /** Layer/depth value: -9 = blocked deep sea, -1 = swimmable sea, 1..N = walkable land, 9 = blocked land. */
   layer: number;
+  /** Walkable land height class: layer 1 = plain, 2 = hill, 3+ = plateau. */
+  landHeight?: LandHeight;
   /** Elevation tier retained for existing callers; mirrors positive walkable land layers, 0 for sea, 4 for layer 9. */
   elevation: number;
   /** Optional special weather overlay generated after land/sea layers. */
@@ -413,6 +417,13 @@ function terrainForLandLayer(layer: number, moisture: number): string {
   return moisture > 0.55 ? "FOREST" : "GRASSLAND";
 }
 
+function landHeightForLayer(layer: number): LandHeight | undefined {
+  if (!isRoadPassableLayer(layer)) return undefined;
+  if (layer === 1) return "plain";
+  if (layer === 2) return "hill";
+  return "plateau";
+}
+
 function elevationForLayer(layer: number): number {
   if (layer < 0) return 0;
   if (layer >= 9) return 4;
@@ -484,11 +495,13 @@ function captureDebugStep(
       const weather = state.weather[i];
       const key = `${col},${row}`;
       const roadTile = roadTiles?.get(key);
+      const landHeight = landHeightForLayer(state.layer[i]!);
       cells.push({
         col,
         row,
         terrain: state.terrain[i]!,
         layer: state.layer[i]!,
+        ...(landHeight ? { landHeight } : {}),
         road: roadTile !== undefined || state.roadConnections.has(key),
         ...(roadTile ? { roadTile } : {}),
         ...(weather ? { weather } : {}),
@@ -619,14 +632,12 @@ function fillSeaLayers(state: MapGenerationState, seed: number, blockedSeaRatio:
 function fillLandLayers(state: MapGenerationState, seed: number, depth: number, blockedLandRatio: number): void {
   const { width, height, terrain, layer, elevation } = state;
   const landScores: { index: number; value: number }[] = [];
-  const heightScores: number[] = new Array(width * height);
 
   for (let row = 0; row < height; row++) {
     for (let col = 0; col < width; col++) {
       const i = idxOf(width, col, row);
       if (isSeaLayer(layer[i]!)) continue;
       const heightNoise = perlinNoise(col / 18, row / 18, seed, 5, 0.54);
-      heightScores[i] = heightNoise;
       landScores.push({ index: i, value: heightNoise });
     }
   }
@@ -640,15 +651,21 @@ function fillLandLayers(state: MapGenerationState, seed: number, depth: number, 
   }
 
   const maxWalkableLayer = Math.max(1, depth - 1);
+  const landLayers = new Map<number, number>();
+  const walkableScores = landScores
+    .filter((score) => !blockedLand.has(score.index))
+    .sort((a, b) => a.value - b.value || a.index - b.index);
+  for (let rank = 0; rank < walkableScores.length; rank++) {
+    const band = Math.min(maxWalkableLayer - 1, Math.floor((rank * maxWalkableLayer) / walkableScores.length));
+    landLayers.set(walkableScores[rank]!.index, band + 1);
+  }
+
   for (let row = 0; row < height; row++) {
     for (let col = 0; col < width; col++) {
       const i = idxOf(width, col, row);
       if (isSeaLayer(layer[i]!)) continue;
-      const heightNoise = heightScores[i]!;
       const moisture = perlinNoise(col / 15, row / 15, seed + 1000, 3, 0.6);
-      const landLayer = blockedLand.has(i)
-        ? 9
-        : Math.min(maxWalkableLayer, 1 + Math.floor(heightNoise * maxWalkableLayer));
+      const landLayer = blockedLand.has(i) ? 9 : (landLayers.get(i) ?? 1);
       layer[i] = landLayer;
       elevation[i] = elevationForLayer(landLayer);
       terrain[i] = terrainForLandLayer(landLayer, moisture);
@@ -1057,7 +1074,7 @@ export function generateMap(
     state,
     "land-levels",
     "Land levels",
-    "Land stage: walkable land uses layers 1..3 by default and blocked cliffs or mountains use layer 9. Blocked land is selected as a configured share of existing land cells.",
+    "Land stage: walkable land uses three named height levels by default: plain (layer 1), hill (layer 2), and plateau (layer 3). Blocked cliffs or mountains use layer 9.",
     seeds.land,
   );
   fillWeather(state, seeds.weather, weatherCoverageLimit);
@@ -1139,12 +1156,14 @@ export function generateMap(
       const h = hex(col, row);
       const road = roadTiles.get(hexKey(h));
       const cellWeather = weather[i];
+      const landHeight = landHeightForLayer(layer[i]!);
       cells.push(
         road
           ? {
               hex: h,
               terrain: terrain[i]!,
               layer: layer[i]!,
+              ...(landHeight ? { landHeight } : {}),
               elevation: elevation[i]!,
               road,
               ...(cellWeather ? { weather: cellWeather } : {}),
@@ -1153,6 +1172,7 @@ export function generateMap(
               hex: h,
               terrain: terrain[i]!,
               layer: layer[i]!,
+              ...(landHeight ? { landHeight } : {}),
               elevation: elevation[i]!,
               ...(cellWeather ? { weather: cellWeather } : {}),
             },
@@ -1264,6 +1284,9 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       LAND_MASK: "#d7dce0",
       SHALLOW_WATER: "#74cbe8",
       SEA: "#256d9b",
+      LAND_PLAIN: "#9bbf72",
+      LAND_HILL: "#b2a35c",
+      LAND_PLATEAU: "#8b8f65",
       GRASSLAND: "#78a85f",
       FOREST: "#3f7d4b",
       DESERT: "#d3bf73",
@@ -1295,20 +1318,23 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     let hexWidth = 1;
     let hexHeight = 1;
     let squareSize = 1;
+    let elevationPad = 0;
 
     function configureCanvas() {
       const fitWidth = 1024;
       const fitSquare = Math.max(1, Math.min(8, Math.floor(fitWidth / DATA.width)));
-      squareSize = zoomMode === "tile30" ? 30 : fitSquare;
-      hexRadius = zoomMode === "tile30" ? 15 : Math.max(1.5, Math.min(8, fitWidth / DATA.width));
+      squareSize = zoomMode === "tile30" ? 60 : fitSquare;
+      hexRadius = zoomMode === "tile30" ? 30 : Math.max(1.5, Math.min(8, fitWidth / DATA.width));
       hexWidth = Math.sqrt(3) * hexRadius;
       hexHeight = 2 * hexRadius;
+      const elevationUnit = zoomMode === "tile30" ? 12 : Math.max(2, Math.round(hexRadius * 0.55));
+      elevationPad = elevationUnit * 2 + 2;
       if (tileShape === "hex") {
         canvas.width = Math.ceil((DATA.width + 0.5) * hexWidth);
-        canvas.height = Math.ceil((DATA.height * 1.5 + 0.5) * hexRadius);
+        canvas.height = Math.ceil((DATA.height * 1.5 + 0.5) * hexRadius + elevationPad);
       } else {
         canvas.width = DATA.width * squareSize;
-        canvas.height = DATA.height * squareSize;
+        canvas.height = DATA.height * squareSize + elevationPad;
       }
     }
     configureCanvas();
@@ -1337,13 +1363,24 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     rerollNav.addEventListener("click", rerollSeed);
     zoomToggle.addEventListener("click", () => {
       zoomMode = zoomMode === "fit" ? "tile30" : "fit";
-      zoomToggle.textContent = zoomMode === "fit" ? "Zoom: Fit" : "Zoom: 30px";
+      zoomToggle.textContent = zoomMode === "fit" ? "Zoom: Fit" : "Zoom: 60px";
       configureCanvas();
       void showStep(activeStepIndex);
     });
 
-    function colorFor(cell) {
+    function landHeightColor(cell) {
+      if (cell.landHeight === "plain") return colors.LAND_PLAIN;
+      if (cell.landHeight === "hill") return colors.LAND_HILL;
+      if (cell.landHeight === "plateau") return colors.LAND_PLATEAU;
+      return null;
+    }
+
+    function colorFor(cell, step) {
       if (cell.road) return colors.ROCK_ROAD;
+      if (step.id === "land-levels") {
+        const heightColor = landHeightColor(cell);
+        if (heightColor) return heightColor;
+      }
       if (cell.terrain in colors) return colors[cell.terrain];
       if (cell.layer === -9) return colors.SEA;
       if (cell.layer === -1) return colors.SHALLOW_WATER;
@@ -1375,56 +1412,196 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       return cached;
     }
 
-    function drawHexCell(cell, color) {
+    function elevationOffsetY(cell) {
+      if (cell.layer < 1 || cell.layer >= 9) return 0;
+      const unit = zoomMode === "tile30" ? 12 : Math.max(2, Math.round(hexRadius * 0.55));
+      return -(cell.layer - 1) * unit;
+    }
+
+    function hasRaisedLand(cell) {
+      return cell.layer > 1 && cell.layer < 9;
+    }
+
+    function hexPoints(cell, yOffset) {
       const cx = hexWidth * (cell.col + 0.5 * (cell.row & 1)) + hexWidth / 2;
-      const cy = hexRadius + cell.row * hexRadius * 1.5;
-      ctx.beginPath();
+      const cy = elevationPad + hexRadius + cell.row * hexRadius * 1.5 + yOffset;
+      const points = [];
       for (let side = 0; side < 6; side++) {
         const angle = Math.PI / 180 * (60 * side - 30);
-        const x = cx + hexRadius * Math.cos(angle);
-        const y = cy + hexRadius * Math.sin(angle);
-        if (side === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        points.push({ x: cx + hexRadius * Math.cos(angle), y: cy + hexRadius * Math.sin(angle) });
       }
+      return points;
+    }
+
+    function drawHexPath(cell, yOffset) {
+      const points = hexPoints(cell, yOffset);
+      ctx.beginPath();
+      points.forEach((point, index) => {
+        if (index === 0) ctx.moveTo(point.x, point.y);
+        else ctx.lineTo(point.x, point.y);
+      });
       ctx.closePath();
+    }
+
+    function drawHexSideWall(cell, yOffset) {
+      if (!hasRaisedLand(cell)) return;
+      const top = hexPoints(cell, yOffset);
+      const base = hexPoints(cell, 0);
+      const sidePairs = [
+        [1, 2],
+        [2, 3],
+        [3, 4],
+      ];
+      for (const [a, b] of sidePairs) {
+        ctx.beginPath();
+        ctx.moveTo(top[a].x, top[a].y);
+        ctx.lineTo(top[b].x, top[b].y);
+        ctx.lineTo(base[b].x, base[b].y);
+        ctx.lineTo(base[a].x, base[a].y);
+        ctx.closePath();
+        ctx.fillStyle = "rgba(111, 75, 37, 0.78)";
+        ctx.fill();
+      }
+      ctx.strokeStyle = "rgba(74, 49, 24, 0.5)";
+      ctx.lineWidth = Math.max(1, Math.round(hexRadius * 0.08));
+      for (const [a, b] of sidePairs) {
+        ctx.beginPath();
+        ctx.moveTo(top[a].x, top[a].y);
+        ctx.lineTo(base[a].x, base[a].y);
+        ctx.moveTo(top[b].x, top[b].y);
+        ctx.lineTo(base[b].x, base[b].y);
+        ctx.stroke();
+      }
+    }
+
+    function cellKey(col, row) {
+      return String(col) + "," + String(row);
+    }
+
+    function neighborCoords(cell, dir) {
+      const odd = cell.row & 1;
+      if (dir === 0) return { col: cell.col + 1, row: cell.row };
+      if (dir === 1) return { col: cell.col + odd, row: cell.row - 1 };
+      if (dir === 2) return { col: cell.col - 1 + odd, row: cell.row - 1 };
+      if (dir === 3) return { col: cell.col - 1, row: cell.row };
+      if (dir === 4) return { col: cell.col - 1 + odd, row: cell.row + 1 };
+      return { col: cell.col + odd, row: cell.row + 1 };
+    }
+
+    function isLowerLandNeighbor(cell, dir, cellLookup) {
+      const n = neighborCoords(cell, dir);
+      const neighbor = cellLookup.get(cellKey(n.col, n.row));
+      return neighbor !== undefined && neighbor.layer > 0 && neighbor.layer < cell.layer;
+    }
+
+    function raisedBorderDirs(cell, cellLookup) {
+      if (!hasRaisedLand(cell)) return [];
+      return [0, 1, 2, 3].filter((dir) => isLowerLandNeighbor(cell, dir, cellLookup));
+    }
+
+    function drawHexRaisedBorder(cell, yOffset, dirs) {
+      if (!hasRaisedLand(cell) || dirs.length === 0) return;
+      const top = hexPoints(cell, yOffset);
+      const edgePairs = {
+        0: [0, 1],
+        1: [5, 0],
+        2: [4, 5],
+        3: [3, 4],
+      };
+      const lineWidth = Math.max(2, Math.round(hexRadius * 0.14));
+      const blur = Math.max(1, Math.round(hexRadius * 0.08));
+      ctx.save();
+      ctx.strokeStyle = "rgba(58, 37, 18, 0.62)";
+      ctx.lineWidth = lineWidth;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.shadowColor = "rgba(58, 37, 18, 0.5)";
+      ctx.shadowBlur = blur;
+      for (const dir of dirs) {
+        const [a, b] = edgePairs[dir];
+        ctx.beginPath();
+        ctx.moveTo(top[a].x, top[a].y);
+        ctx.lineTo(top[b].x, top[b].y);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawSquareSideWall(cell, yOffset) {
+      if (!hasRaisedLand(cell)) return;
+      const x = cell.col * squareSize;
+      const baseY = elevationPad + cell.row * squareSize;
+      const topY = baseY + yOffset;
+      const drop = baseY - topY;
+      const sideWidth = Math.max(1, Math.round(squareSize * 0.14));
+      ctx.fillStyle = "rgba(111, 75, 37, 0.78)";
+      ctx.fillRect(x, topY + squareSize, squareSize, drop);
+      ctx.fillStyle = "rgba(83, 55, 27, 0.78)";
+      ctx.fillRect(x + squareSize - sideWidth, topY, sideWidth, squareSize + drop);
+    }
+
+    function drawSquareRaisedRim(cell, yOffset, dirs) {
+      if (!hasRaisedLand(cell) || dirs.length === 0) return;
+      const x = cell.col * squareSize;
+      const y = elevationPad + cell.row * squareSize + yOffset;
+      const lineWidth = Math.max(2, Math.round(squareSize * 0.08));
+      ctx.save();
+      ctx.strokeStyle = "rgba(74, 49, 24, 0.58)";
+      ctx.lineWidth = lineWidth;
+      ctx.shadowColor = "rgba(58, 37, 18, 0.45)";
+      ctx.shadowBlur = Math.max(1, Math.round(squareSize * 0.04));
+      ctx.beginPath();
+      ctx.moveTo(x, y - lineWidth * 0.65);
+      ctx.lineTo(x + squareSize, y - lineWidth * 0.65);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawHexCell(cell, color, yOffset = elevationOffsetY(cell)) {
+      drawHexSideWall(cell, yOffset);
+      drawHexPath(cell, yOffset);
       ctx.fillStyle = color;
       ctx.fill();
     }
 
-    function drawSquareCell(cell, color) {
+    function drawSquareCell(cell, color, yOffset = elevationOffsetY(cell)) {
+      const baseY = elevationPad + cell.row * squareSize;
+      drawSquareSideWall(cell, yOffset);
       ctx.fillStyle = color;
-      ctx.fillRect(cell.col * squareSize, cell.row * squareSize, squareSize, squareSize);
+      ctx.fillRect(cell.col * squareSize, baseY + yOffset, squareSize, squareSize);
     }
 
-    function clipHexCell(cell) {
+    function clipHexCell(cell, yOffset = elevationOffsetY(cell)) {
       const cx = hexWidth * (cell.col + 0.5 * (cell.row & 1)) + hexWidth / 2;
-      const cy = hexRadius + cell.row * hexRadius * 1.5;
-      ctx.beginPath();
-      for (let side = 0; side < 6; side++) {
-        const angle = Math.PI / 180 * (60 * side - 30);
-        const x = cx + hexRadius * Math.cos(angle);
-        const y = cy + hexRadius * Math.sin(angle);
-        if (side === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.closePath();
+      const cy = elevationPad + hexRadius + cell.row * hexRadius * 1.5 + yOffset;
+      drawHexPath(cell, yOffset);
       return { x: cx - hexWidth / 2, y: cy - hexHeight / 2, width: hexWidth, height: hexHeight };
     }
 
-    async function drawSpriteCell(cell) {
+    async function preloadCellSprites(cell) {
+      const sources = [spritePathFor(cell)];
+      const roadPath = roadSpritePathFor(cell);
+      if (roadPath) sources.push(roadPath);
+      await Promise.all(sources.map((src) => loadSprite(src)));
+    }
+
+    async function drawSpriteCell(cell, step) {
+      const yOffset = elevationOffsetY(cell);
+      if (tileShape === "hex") drawHexSideWall(cell, yOffset);
+      else drawSquareSideWall(cell, yOffset);
       const baseImage = await loadSprite(spritePathFor(cell));
       if (!baseImage) {
-        const color = colorFor(cell);
-        if (tileShape === "hex") drawHexCell(cell, color);
-        else drawSquareCell(cell, color);
+        const color = colorFor(cell, step);
+        if (tileShape === "hex") drawHexCell(cell, color, yOffset);
+        else drawSquareCell(cell, color, yOffset);
       } else if (tileShape === "hex") {
-        const box = clipHexCell(cell);
+        const box = clipHexCell(cell, yOffset);
         ctx.save();
         ctx.clip();
         ctx.drawImage(baseImage, box.x, box.y, box.width, box.height);
         ctx.restore();
       } else {
-        ctx.drawImage(baseImage, cell.col * squareSize, cell.row * squareSize, squareSize, squareSize);
+        ctx.drawImage(baseImage, cell.col * squareSize, elevationPad + cell.row * squareSize + yOffset, squareSize, squareSize);
       }
 
       const roadPath = roadSpritePathFor(cell);
@@ -1432,13 +1609,29 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       const roadImage = await loadSprite(roadPath);
       if (!roadImage) return;
       if (tileShape === "hex") {
-        const box = clipHexCell(cell);
+        const box = clipHexCell(cell, yOffset);
         ctx.save();
         ctx.clip();
         ctx.drawImage(roadImage, box.x, box.y, box.width, box.height);
         ctx.restore();
       } else {
-        ctx.drawImage(roadImage, cell.col * squareSize, cell.row * squareSize, squareSize, squareSize);
+        ctx.drawImage(roadImage, cell.col * squareSize, elevationPad + cell.row * squareSize + yOffset, squareSize, squareSize);
+      }
+
+    }
+
+    function drawOrder(cells) {
+      return [...cells].sort((a, b) => a.row - b.row || a.layer - b.layer || a.col - b.col);
+    }
+
+    function drawRaisedRimOverlay(cells) {
+      const cellLookup = new Map(cells.map((cell) => [cellKey(cell.col, cell.row), cell]));
+      for (const cell of cells) {
+        const yOffset = elevationOffsetY(cell);
+        const borderDirs = raisedBorderDirs(cell, cellLookup);
+        if (borderDirs.length === 0) continue;
+        if (tileShape === "hex") drawHexRaisedBorder(cell, yOffset, borderDirs);
+        else drawSquareRaisedRim(cell, yOffset, borderDirs);
       }
     }
 
@@ -1449,15 +1642,18 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       stepSeed.textContent = \`Step seed: \${step.seed}\`;
       description.textContent = step.description;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const cells = drawOrder(step.cells);
       if (step.id === "sprite-fill") {
-        await Promise.all(step.cells.map((cell) => drawSpriteCell(cell)));
+        await Promise.all(cells.map((cell) => preloadCellSprites(cell)));
+        for (const cell of cells) await drawSpriteCell(cell, step);
       } else {
-        for (const cell of step.cells) {
-          const color = colorFor(cell);
+        for (const cell of cells) {
+          const color = colorFor(cell, step);
           if (tileShape === "hex") drawHexCell(cell, color);
           else drawSquareCell(cell, color);
         }
       }
+      drawRaisedRimOverlay(cells);
       for (const button of nav.querySelectorAll("button")) button.classList.remove("active");
       nav.querySelector(\`button[data-index="\${index}"]\`).classList.add("active");
     }
