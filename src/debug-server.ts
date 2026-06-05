@@ -1,10 +1,20 @@
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import path from "node:path";
 import { URL } from "node:url";
 
-import { generateMap, renderMapGenerationDebugHtml, type GenerateMapOptions, type TopologyMode } from "./mapgen.js";
+import {
+  generateMap,
+  renderMapGenerationDebugHtml,
+  type GenerateMapOptions,
+  type TileShape,
+  type TopologyMode,
+} from "./mapgen.js";
 
 const DEFAULT_PORT = 5999;
 const DEFAULT_HOST = "0.0.0.0";
+const SPRITES_ROOT = path.resolve("sprites");
 
 function argValue(name: string): string | undefined {
   const prefix = `--${name}=`;
@@ -30,6 +40,10 @@ function topologyParam(value: string | null): TopologyMode {
   return value === "land" || value === "sea" || value === "full" ? value : "full";
 }
 
+function tileShapeParam(value: string | null): TileShape {
+  return value === "square" || value === "hex" ? value : "hex";
+}
+
 function generateDebugHtml(url: URL): string {
   const seed = intParam(url.searchParams.get("seed"), 12345);
   const options: GenerateMapOptions = {
@@ -37,10 +51,38 @@ function generateDebugHtml(url: URL): string {
     height: intParam(url.searchParams.get("height"), 500),
     depth: intParam(url.searchParams.get("depth"), 4),
     topology: topologyParam(url.searchParams.get("topology")),
+    tileShape: tileShapeParam(url.searchParams.get("tileShape")),
+    roadDensity: floatParam(url.searchParams.get("roadDensity"), 0.09642857142857142),
+    blockedSeaRatio: floatParam(url.searchParams.get("blockedSeaRatio"), 0.2),
+    blockedLandRatio: floatParam(url.searchParams.get("blockedLandRatio"), 0.1),
     weatherCoverageLimit: floatParam(url.searchParams.get("weatherCoverageLimit"), 0.25),
     debug: true,
   };
   return renderMapGenerationDebugHtml(generateMap(seed, options));
+}
+
+async function serveSprite(pathname: string, res: ServerResponse): Promise<void> {
+  const relativePath = decodeURIComponent(pathname.replace(/^\/sprites\/?/, ""));
+  const filePath = path.resolve(SPRITES_ROOT, relativePath);
+  if (!filePath.startsWith(`${SPRITES_ROOT}${path.sep}`)) {
+    res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Forbidden");
+    return;
+  }
+
+  try {
+    const file = await stat(filePath);
+    if (!file.isFile()) throw new Error("Not a file");
+    res.writeHead(200, {
+      "cache-control": "public, max-age=300",
+      "content-length": file.size,
+      "content-type": "image/png",
+    });
+    createReadStream(filePath).pipe(res);
+  } catch {
+    res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Sprite not found");
+  }
 }
 
 const port = intParam(argValue("port") ?? process.env.PORT ?? null, DEFAULT_PORT);
@@ -52,6 +94,11 @@ const server = createServer((req, res) => {
   if (url.pathname === "/health") {
     res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  if (url.pathname.startsWith("/sprites/")) {
+    void serveSprite(url.pathname, res);
     return;
   }
 

@@ -49,7 +49,11 @@ The current source game links `sprites/terrain` into
 - Height: `500`
 - Depth: `4`
 - Topology: `full` sea, land, and weather
+- Tile shape: `hex`
+- Road density: `0.0964285714` road tiles per land tile
 - Sea coverage: `30%` of total map cells
+- Blocked sea coverage: `20%` of sea cells
+- Blocked land coverage: `10%` of land cells
 - Weather coverage cap: `0.25` of total map cells
 
 The legacy-compatible call shape still works:
@@ -68,6 +72,8 @@ const map = generateMap(12345, {
   height: 60,
   depth: 4,
   topology: "full",
+  tileShape: "hex",
+  roadDensity: 0.0964285714,
   weatherCoverageLimit: 0.2,
   debug: true,
 });
@@ -88,15 +94,17 @@ per-stage seeds unless a caller passes explicit seed overrides.
 2. Sea passability
 
    The sea seed assigns sea cells as either swimmable or blocked. Swimmable sea
-   uses layer `-1`; blocked sea uses layer `-9`. If the topology contains no
-   sea, this stage has no effect.
+   uses layer `-1`; blocked sea uses layer `-9`. By default, blocked sea covers
+   `20%` of cells that were already selected as sea, not `20%` of the whole map.
+   If the topology contains no sea, this stage has no effect.
 
 3. Land layers
 
    The land seed assigns land cells to walkable layers and blocked terrain.
    Default depth `4` produces walkable land layers `1`, `2`, and `3`, plus layer
-   `9` for non-walkable cliffs or high mountains. If the topology contains no
-   land, this stage has no effect.
+   `9` for non-walkable cliffs or high mountains. By default, blocked land
+   covers `10%` of cells that were already selected as land, not `10%` of the
+   whole map. If the topology contains no land, this stage has no effect.
 
 4. Weather
 
@@ -109,7 +117,20 @@ per-stage seeds unless a caller passes explicit seed overrides.
    Roads are generated on land after terrain and weather. A road can only move
    between walkable land cells, and each step may change by at most one layer:
    `1` to `2`, `2` to `1`, `2` to `3`, or `3` to `2` are valid. Roads cannot
-   move to layer `9`, layer `-9`, or sea.
+   move to layer `9`, layer `-9`, or sea. Roads are one tile wide; generation
+   must not widen a road into neighboring tiles. `roadDensity` targets the
+   number of road overlay tiles divided by the total number of land tiles. The
+   default is 1.5 times the density produced by the reference seed
+   `ratio=1600779894`, `sea=1557164007`, `land=1924685185`,
+   `weather=825734366`, `road=891917556` at `80 x 40`.
+
+6. Sprite fill
+
+   The final stage resolves the generated terrain codes and road overlays into
+   sprite-ready tile values and renders the PNG assets from `sprites/`. The
+   base terrain sprite is rendered first, then any road sprite from
+   `sprites/terrain/rock-road` is rendered on top. The debug site can display
+   either pointy-top hex tiles or square tiles. Hex is the default shape.
 
 ## Debug HTML
 
@@ -146,9 +167,10 @@ Open `http://localhost:5999` to inspect the staged generation output. Query
 parameters can override generation inputs, for example:
 
 ```text
-http://localhost:5999/?seed=12345&width=120&height=60&depth=4&topology=full&weatherCoverageLimit=0.25
+http://localhost:5999/?seed=12345&width=120&height=60&depth=4&topology=full&tileShape=hex&roadDensity=0.0964285714&blockedSeaRatio=0.2&blockedLandRatio=0.1&weatherCoverageLimit=0.25
 ```
 
 The debug page displays the root seed, every per-step derived seed, and the seed
 used by each individual generation step. Use `Regenerate` to reload the current
-seed and `Reroll` to update the URL with a new root seed.
+seed, `Reroll` to update the URL with a new root seed, and the zoom toggle to
+switch between fit-to-view and 30px-per-tile rendering.
