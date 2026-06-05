@@ -10,9 +10,12 @@
     "./rng": "./src/rng.ts"
   },
   "scripts": {
+    "debug": "tsx src/debug-server.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/node": "^22.15.30",
+    "tsx": "^4.19.4",
     "typescript": "^5.7.2"
   }
 }

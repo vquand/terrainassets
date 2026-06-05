@@ -1,0 +1,10 @@
+services:
+  terrain-debug:
+    build:
+      context: .
+      dockerfile: Dockerfile.debug
+    ports:
+      - "5999:5999"
+    environment:
+      PORT: "5999"
+      HOST: "0.0.0.0"

@@ -13,7 +13,7 @@
 // is the only engine we target: browser, Electron, Node).
 
 import { Rng } from "./rng.js";
-import { hex, hexKey, hexLine, neighbor, neighbors, type Hex } from "./hex.js";
+import { hex, hexesInRange, hexKey, hexLine, neighbor, neighbors, type Hex } from "./hex.js";
 
 export type RoadVariant =
   | "straight"
@@ -112,13 +112,66 @@ export interface RoadTile {
   readonly connections: readonly RoadDir[];
 }
 
+export type TopologyMode = "full" | "land" | "sea";
+export type WeatherType = "STORM" | "SNOW" | "VOLCANO" | "SWAMP";
+
+export interface LayerSeeds {
+  readonly ratio: number;
+  readonly sea: number;
+  readonly land: number;
+  readonly weather: number;
+  readonly road: number;
+}
+
+export interface GenerateMapOptions {
+  readonly width?: number;
+  readonly height?: number;
+  /** Number of terrain depth bands. Default 4 => sea plus walkable land levels 1..3. */
+  readonly depth?: number;
+  /** full = sea + land + weather, land = land-only, sea = sea-only. */
+  readonly topology?: TopologyMode;
+  /** Maximum special-weather surface coverage, as a fraction of total cells. Default 0.25. */
+  readonly weatherCoverageLimit?: number;
+  /** Optional per-step seed overrides. Missing seeds are derived from the root seed. */
+  readonly seeds?: Partial<LayerSeeds>;
+  /** Capture generation snapshots suitable for renderMapGenerationDebugHtml. */
+  readonly debug?: boolean;
+}
+
+export interface MapGenerationDebugCell {
+  readonly col: number;
+  readonly row: number;
+  readonly terrain: string;
+  readonly layer: number;
+  readonly weather?: WeatherType;
+  readonly road: boolean;
+}
+
+export interface MapGenerationDebugStep {
+  readonly id: string;
+  readonly title: string;
+  readonly description: string;
+  readonly seed: number;
+  readonly cells: readonly MapGenerationDebugCell[];
+}
+
+export interface MapGenerationDebug {
+  readonly seeds: LayerSeeds;
+  readonly seaRatio: number;
+  readonly steps: readonly MapGenerationDebugStep[];
+}
+
 /** One generated map cell. */
 export interface MapCell {
   readonly hex: Hex;
   /** Terrain code keying into @undersiege/data terrain (e.g. "GRASSLAND"). */
   terrain: string;
-  /** Elevation tier 0..4 (0 = sea level). Affects vision/range/movement. */
+  /** Layer/depth value: -9 = blocked deep sea, -1 = swimmable sea, 1..N = walkable land, 9 = blocked land. */
+  layer: number;
+  /** Elevation tier retained for existing callers; mirrors positive walkable land layers, 0 for sea, 4 for layer 9. */
   elevation: number;
+  /** Optional special weather overlay generated after land/sea layers. */
+  weather?: WeatherType;
   /** Optional visual road centerline overlay for ROCK_ROAD tiles. */
   road?: RoadTile;
 }
@@ -134,6 +187,9 @@ export interface Portal {
 /** A fully generated map. */
 export interface GameMap {
   readonly seed: number;
+  readonly layerSeeds: LayerSeeds;
+  readonly depth: number;
+  readonly topology: TopologyMode;
   /** Scenario preset id when the map came from a hand-authored layout. */
   readonly preset?: string;
   readonly width: number;
@@ -150,6 +206,8 @@ export interface GameMap {
   readonly capitol: Hex;
   /** Edge-of-map enemy spawn points; deterministic given the seed. */
   readonly portals: readonly Portal[];
+  /** Optional staged generation snapshots, present only when debug is enabled. */
+  readonly debug?: MapGenerationDebug;
 }
 
 /** Look up a cell, or undefined if out of bounds. */
@@ -279,6 +337,71 @@ const clampInt = (v: number, lo: number, hi: number) =>
 const idxOf = (width: number, col: number, row: number) => row * width + col;
 const inBoundsOf = (width: number, height: number, col: number, row: number) =>
   col >= 0 && row >= 0 && col < width && row < height;
+const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+const DEFAULT_SEA_RATIO = 0.3;
+
+interface ResolvedGenerateMapOptions {
+  readonly width: number;
+  readonly height: number;
+  readonly depth: number;
+  readonly topology: TopologyMode;
+  readonly weatherCoverageLimit: number;
+  readonly seeds: LayerSeeds;
+  readonly debug: boolean;
+}
+
+function deriveSeeds(seed: number, overrides: Partial<LayerSeeds> | undefined): LayerSeeds {
+  const rng = new Rng(seed);
+  return {
+    ratio: overrides?.ratio ?? rng.int(1, 0x7fffffff),
+    sea: overrides?.sea ?? rng.int(1, 0x7fffffff),
+    land: overrides?.land ?? rng.int(1, 0x7fffffff),
+    weather: overrides?.weather ?? rng.int(1, 0x7fffffff),
+    road: overrides?.road ?? rng.int(1, 0x7fffffff),
+  };
+}
+
+function resolveGenerateMapOptions(
+  seed: number,
+  widthOrOptions?: number | GenerateMapOptions,
+  height?: number,
+  options?: GenerateMapOptions,
+): ResolvedGenerateMapOptions {
+  const raw = typeof widthOrOptions === "object" ? widthOrOptions : options;
+  const width = typeof widthOrOptions === "number" ? widthOrOptions : raw?.width ?? 1000;
+  return {
+    width: Math.max(1, Math.round(width)),
+    height: Math.max(1, Math.round(height ?? raw?.height ?? 500)),
+    depth: Math.max(2, Math.round(raw?.depth ?? 4)),
+    topology: raw?.topology ?? "full",
+    weatherCoverageLimit: clamp01(raw?.weatherCoverageLimit ?? 0.25),
+    seeds: deriveSeeds(seed, raw?.seeds),
+    debug: raw?.debug ?? false,
+  };
+}
+
+function terrainForLandLayer(layer: number, moisture: number): string {
+  if (layer >= 9) return "MOUNTAIN";
+  if (layer >= 3) return moisture < 0.35 ? "DESERT" : moisture < 0.65 ? "GRASSLAND" : "FOREST";
+  if (layer === 2) return moisture < 0.45 ? "GRASSLAND" : "FOREST";
+  if (moisture < 0.22) return "DESERT";
+  if (moisture > 0.82) return "SWAMP";
+  return moisture > 0.55 ? "FOREST" : "GRASSLAND";
+}
+
+function elevationForLayer(layer: number): number {
+  if (layer < 0) return 0;
+  if (layer >= 9) return 4;
+  return layer;
+}
+
+function isSeaLayer(layer: number): boolean {
+  return layer < 0;
+}
+
+function isRoadPassableLayer(layer: number): boolean {
+  return layer >= 1 && layer < 9;
+}
 
 /** Build a shaped, hex-adjacent path from the left edge to the right edge. */
 function buildPath(width: number, height: number, startRow: number, endRow: number, shape: ShapeFn): Hex[] {
@@ -314,8 +437,37 @@ interface MapGenerationState {
   readonly width: number;
   readonly height: number;
   readonly terrain: string[];
+  readonly layer: number[];
   readonly elevation: number[];
+  readonly weather: (WeatherType | undefined)[];
   readonly roadConnections: Map<string, Set<number>>;
+  readonly debugSteps?: MapGenerationDebugStep[];
+}
+
+function captureDebugStep(
+  state: MapGenerationState,
+  id: string,
+  title: string,
+  description: string,
+  seed: number,
+): void {
+  if (!state.debugSteps) return;
+  const cells: MapGenerationDebugCell[] = [];
+  for (let row = 0; row < state.height; row++) {
+    for (let col = 0; col < state.width; col++) {
+      const i = idxOf(state.width, col, row);
+      const weather = state.weather[i];
+      cells.push({
+        col,
+        row,
+        terrain: state.terrain[i]!,
+        layer: state.layer[i]!,
+        road: state.terrain[i] === "ROCK_ROAD",
+        ...(weather ? { weather } : {}),
+      });
+    }
+  }
+  state.debugSteps.push({ id, title, description, seed, cells });
 }
 
 function connectRoad(state: MapGenerationState, a: Hex, b: Hex): void {
@@ -341,74 +493,217 @@ function directionBetween(from: Hex, to: Hex): number | undefined {
 }
 
 function addRoadPath(state: MapGenerationState, path: readonly Hex[], widenChance: number): void {
-  const { rng, width, height, terrain } = state;
+  const { rng, width, height, terrain, layer } = state;
   for (let i = 0; i < path.length; i++) {
     const cell = path[i]!;
     if (!inBoundsOf(width, height, cell.col, cell.row)) continue;
+    if (!isRoadPassableLayer(layer[idxOf(width, cell.col, cell.row)]!)) continue;
+    if (i > 0) {
+      const prev = path[i - 1]!;
+      if (
+        !inBoundsOf(width, height, prev.col, prev.row) ||
+        !isRoadPassableLayer(layer[idxOf(width, prev.col, prev.row)]!) ||
+        Math.abs(layer[idxOf(width, prev.col, prev.row)]! - layer[idxOf(width, cell.col, cell.row)]!) > 1
+      ) {
+        continue;
+      }
+      connectRoad(state, prev, cell);
+    }
     terrain[idxOf(width, cell.col, cell.row)] = "ROCK_ROAD";
-    if (i > 0) connectRoad(state, path[i - 1]!, cell);
 
     for (const n of neighbors(cell)) {
       if (!inBoundsOf(width, height, n.col, n.row)) continue;
       const ni = idxOf(width, n.col, n.row);
-      if (terrain[ni] === "MOUNTAIN") continue;
+      if (!isRoadPassableLayer(layer[ni]!) || Math.abs(layer[ni]! - layer[idxOf(width, cell.col, cell.row)]!) > 1) {
+        continue;
+      }
       if (rng.next() < widenChance) terrain[ni] = "ROCK_ROAD";
     }
   }
 }
 
-function generateLandAndSea(seed: number, width: number, height: number): Pick<MapGenerationState, "terrain" | "elevation"> {
+function generateLandAndSeaMask(
+  seed: number,
+  width: number,
+  height: number,
+  topology: TopologyMode,
+): { terrain: string[]; layer: number[]; elevation: number[]; weather: (WeatherType | undefined)[]; seaRatio: number } {
   const terrain: string[] = new Array(width * height);
+  const layer: number[] = new Array(width * height);
   const elevation: number[] = new Array(width * height);
-  for (let row = 0; row < height; row++) {
-    for (let col = 0; col < width; col++) {
-      const h = perlinNoise(col / 10, row / 10, seed, 4, 0.5);
-      const m = perlinNoise(col / 8, row / 8, seed + 1000, 3, 0.6);
-      const i = idxOf(width, col, row);
-      terrain[i] = terrainFor(h, m);
-      elevation[i] = elevationFor(h);
-    }
-  }
-  return { terrain, elevation };
-}
+  const weather: (WeatherType | undefined)[] = new Array(width * height).fill(undefined);
+  const seaRatio = topology === "land" ? 0 : topology === "sea" ? 1 : DEFAULT_SEA_RATIO;
+  const cellCount = width * height;
+  const seaTarget = Math.round(cellCount * seaRatio);
+  const seaCells = new Set<number>();
 
-function fillSeaWithIslands(state: MapGenerationState): void {
-  const { rng, width, height, terrain, elevation } = state;
-  const islandCount = rng.int(1, 3);
-  for (let i = 0; i < islandCount; i++) {
-    const center = hex(rng.int(2, width - 3), rng.int(2, height - 3));
-    if (terrain[idxOf(width, center.col, center.row)] !== "SEA") continue;
-    terrain[idxOf(width, center.col, center.row)] = rng.next() < 0.55 ? "GRASSLAND" : "FOREST";
-    elevation[idxOf(width, center.col, center.row)] = 1;
-    for (const n of neighbors(center)) {
-      if (!inBoundsOf(width, height, n.col, n.row)) continue;
-      const ni = idxOf(width, n.col, n.row);
-      if (terrain[ni] === "SEA" && rng.next() < 0.45) {
-        terrain[ni] = "SHALLOW_WATER";
+  if (seaTarget > 0 && seaTarget < cellCount) {
+    const scores: { index: number; value: number }[] = [];
+    for (let row = 0; row < height; row++) {
+      for (let col = 0; col < width; col++) {
+        scores.push({
+          index: idxOf(width, col, row),
+          value: perlinNoise(col / 48, row / 48, seed, 5, 0.52),
+        });
       }
     }
+    scores.sort((a, b) => a.value - b.value || a.index - b.index);
+    for (let i = 0; i < seaTarget; i++) seaCells.add(scores[i]!.index);
+  }
+
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
+      const i = idxOf(width, col, row);
+      const isSea = topology === "sea" || (topology === "full" && seaCells.has(i));
+      terrain[i] = isSea ? "SEA_MASK" : "LAND_MASK";
+      layer[i] = isSea ? -1 : 1;
+      elevation[i] = isSea ? 0 : 1;
+    }
+  }
+  return { terrain, layer, elevation, weather, seaRatio };
+}
+
+function fillSeaLayers(state: MapGenerationState, seed: number): void {
+  const { width, height, terrain, layer, elevation } = state;
+  let seaCount = 0;
+  for (const value of layer) if (isSeaLayer(value)) seaCount++;
+  if (seaCount === 0) return;
+
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
+      const i = idxOf(width, col, row);
+      if (!isSeaLayer(layer[i]!)) continue;
+      const depthNoise = perlinNoise(col / 22, row / 22, seed, 4, 0.58);
+      const blocked = depthNoise > 0.74;
+      layer[i] = blocked ? -9 : -1;
+      elevation[i] = 0;
+      terrain[i] = blocked ? "SEA" : "SHALLOW_WATER";
+    }
   }
 }
 
-function fillLandElements(_state: MapGenerationState): void {
-  // The height/moisture terrain bands currently provide the base land element
-  // mix. Keep this stage explicit so more biome passes can be added without
-  // entangling road generation.
+function fillLandLayers(state: MapGenerationState, seed: number, depth: number): void {
+  const { width, height, terrain, layer, elevation } = state;
+  let landCount = 0;
+  for (const value of layer) if (!isSeaLayer(value)) landCount++;
+  if (landCount === 0) return;
+
+  const maxWalkableLayer = Math.max(1, depth - 1);
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
+      const i = idxOf(width, col, row);
+      if (isSeaLayer(layer[i]!)) continue;
+      const heightNoise = perlinNoise(col / 18, row / 18, seed, 5, 0.54);
+      const moisture = perlinNoise(col / 15, row / 15, seed + 1000, 3, 0.6);
+      const blocked = heightNoise > 0.9;
+      const landLayer = blocked
+        ? 9
+        : Math.min(maxWalkableLayer, 1 + Math.floor(heightNoise * maxWalkableLayer));
+      layer[i] = landLayer;
+      elevation[i] = elevationForLayer(landLayer);
+      terrain[i] = terrainForLandLayer(landLayer, moisture);
+    }
+  }
+}
+
+function fillWeather(state: MapGenerationState, seed: number, coverageLimit: number): void {
+  if (coverageLimit <= 0) return;
+  const { rng, width, height, terrain, layer, weather } = state;
+  const maxWeatherCells = Math.floor(width * height * coverageLimit);
+  if (maxWeatherCells === 0) return;
+  const weatherRng = new Rng(seed);
+  const types: readonly WeatherType[] = ["STORM", "SNOW", "VOLCANO", "SWAMP"];
+  let covered = 0;
+  const targetPatches = Math.max(1, Math.round(Math.sqrt(maxWeatherCells) / 2));
+
+  for (let patch = 0; patch < targetPatches && covered < maxWeatherCells; patch++) {
+    const center = hex(weatherRng.int(0, width - 1), weatherRng.int(0, height - 1));
+    const radius = weatherRng.int(1, Math.max(1, Math.round(Math.min(width, height) * 0.035)));
+    const type = weatherRng.pick(types);
+    for (const cell of hexesInRange(center, radius)) {
+      if (!inBoundsOf(width, height, cell.col, cell.row) || covered >= maxWeatherCells) continue;
+      const i = idxOf(width, cell.col, cell.row);
+      if (!isRoadPassableLayer(layer[i]!) || weather[i]) continue;
+      if (rng.next() > 0.72) continue;
+      weather[i] = type;
+      terrain[i] = type;
+      covered++;
+    }
+  }
+}
+
+function canRoadStep(state: MapGenerationState, from: Hex, to: Hex): boolean {
+  if (!inBoundsOf(state.width, state.height, to.col, to.row)) return false;
+  const fromLayer = state.layer[idxOf(state.width, from.col, from.row)]!;
+  const toLayer = state.layer[idxOf(state.width, to.col, to.row)]!;
+  return isRoadPassableLayer(toLayer) && Math.abs(fromLayer - toLayer) <= 1;
+}
+
+function findRoadPath(state: MapGenerationState, start: Hex, end: Hex): Hex[] {
+  const startLayer = state.layer[idxOf(state.width, start.col, start.row)]!;
+  const endLayer = state.layer[idxOf(state.width, end.col, end.row)]!;
+  if (!isRoadPassableLayer(startLayer) || !isRoadPassableLayer(endLayer)) return [];
+
+  const queue: Hex[] = [start];
+  const cameFrom = new Map<string, Hex | null>([[hexKey(start), null]]);
+  for (let head = 0; head < queue.length; head++) {
+    const cur = queue[head]!;
+    if (cur.col === end.col && cur.row === end.row) break;
+    const nextCells = neighbors(cur).sort(
+      (a, b) =>
+        hexDistanceForSort(a, end) - hexDistanceForSort(b, end) ||
+        Math.abs(a.row - end.row) - Math.abs(b.row - end.row),
+    );
+    for (const next of nextCells) {
+      const key = hexKey(next);
+      if (cameFrom.has(key) || !canRoadStep(state, cur, next)) continue;
+      cameFrom.set(key, cur);
+      queue.push(next);
+    }
+  }
+
+  const endKey = hexKey(end);
+  if (!cameFrom.has(endKey)) return [];
+  const path: Hex[] = [];
+  let cur: Hex | null = end;
+  while (cur) {
+    path.push(cur);
+    cur = cameFrom.get(hexKey(cur)) ?? null;
+  }
+  return path.reverse();
+}
+
+function hexDistanceForSort(a: Hex, b: Hex): number {
+  return Math.abs(a.col - b.col) + Math.abs(a.row - b.row);
+}
+
+function roadCandidates(state: MapGenerationState, minCol: number, maxCol: number): Hex[] {
+  const out: Hex[] = [];
+  for (let row = 1; row < state.height - 1; row++) {
+    for (let col = minCol; col <= maxCol; col++) {
+      if (!inBoundsOf(state.width, state.height, col, row)) continue;
+      if (isRoadPassableLayer(state.layer[idxOf(state.width, col, row)]!)) out.push(hex(col, row));
+    }
+  }
+  return out;
 }
 
 function drawRoads(state: MapGenerationState): Hex[][] {
-  const { rng, width, height, terrain } = state;
+  const { rng, width, height, layer } = state;
   const paths: Hex[][] = [];
-  const numPaths = Math.max(2, Math.floor(height / 6));
-  const minBand = Math.floor(height * 0.3);
-  const maxBand = Math.floor(height * 0.7);
-  const step = (maxBand - minBand) / (numPaths + 1);
+  const passableCount = layer.reduce((count, value) => count + (isRoadPassableLayer(value) ? 1 : 0), 0);
+  if (passableCount === 0) return paths;
 
-  for (let p = 1; p <= numPaths; p++) {
-    const startRow = clampInt(minBand + step * p, minBand, maxBand);
-    const endRow = clampInt(minBand + step * (p + rng.int(-1, 1)), minBand, maxBand);
-    const shape = ROUTE_SHAPES[(p - 1) % ROUTE_SHAPES.length]!;
-    const path = buildPath(width, height, startRow, endRow, shape);
+  const numPaths = Math.max(1, Math.min(12, Math.floor(height / 50)));
+  const left = rng.shuffle(roadCandidates(state, 0, Math.min(width - 1, Math.ceil(width * 0.15))));
+  const right = rng.shuffle(roadCandidates(state, Math.max(0, Math.floor(width * 0.85)), width - 1));
+  if (left.length === 0 || right.length === 0) return paths;
+
+  for (let p = 0; p < numPaths; p++) {
+    const start = left[p % left.length]!;
+    const end = right[(p * 7 + rng.int(0, right.length - 1)) % right.length]!;
+    const path = findRoadPath(state, start, end);
+    if (path.length === 0) continue;
     addRoadPath(state, path, 0.7);
     paths.push(path);
   }
@@ -424,7 +719,7 @@ function drawRoads(state: MapGenerationState): Hex[][] {
     if (!pa || !pb) continue;
     const connector = hexLine(pa, pb).filter((cell) => {
       if (!inBoundsOf(width, height, cell.col, cell.row)) return false;
-      return terrain[idxOf(width, cell.col, cell.row)] !== "MOUNTAIN";
+      return isRoadPassableLayer(layer[idxOf(width, cell.col, cell.row)]!);
     });
     addRoadPath(state, connector, 0.6);
   }
@@ -628,27 +923,82 @@ export function roadTilesForPaths(paths: readonly (readonly Hex[])[]): Map<strin
   return out;
 }
 
-/** Generate a map. The same (seed, width, height) always yields the same map. */
-export function generateMap(seed: number, width: number, height: number): GameMap {
-  const rng = new Rng(seed);
-  const { terrain, elevation } = generateLandAndSea(seed, width, height);
-  const state: MapGenerationState = { rng, width, height, terrain, elevation, roadConnections: new Map() };
-  fillSeaWithIslands(state);
-  fillLandElements(state);
+/** Generate a map. The same seed and options always yield the same map. */
+export function generateMap(seed: number, width: number, height: number): GameMap;
+export function generateMap(seed: number, options?: GenerateMapOptions): GameMap;
+export function generateMap(
+  seed: number,
+  widthOrOptions?: number | GenerateMapOptions,
+  height?: number,
+  options?: GenerateMapOptions,
+): GameMap {
+  const resolved = resolveGenerateMapOptions(seed, widthOrOptions, height, options);
+  const { width, height: mapHeight, depth, topology, weatherCoverageLimit, seeds } = resolved;
+  const rng = new Rng(seeds.road);
+  const { terrain, layer, elevation, weather, seaRatio } = generateLandAndSeaMask(
+    seeds.ratio,
+    width,
+    mapHeight,
+    topology,
+  );
+  const debugSteps = resolved.debug ? [] : undefined;
+  const state: MapGenerationState = {
+    rng,
+    width,
+    height: mapHeight,
+    terrain,
+    layer,
+    elevation,
+    weather,
+    roadConnections: new Map(),
+    ...(debugSteps ? { debugSteps } : {}),
+  };
+  captureDebugStep(
+    state,
+    "land-sea-ratio",
+    "Land / sea ratio",
+    "Seeded mask stage: sea cells are light blue and land cells are light gray before sprites or passability are assigned.",
+    seeds.ratio,
+  );
+  fillSeaLayers(state, seeds.sea);
+  captureDebugStep(
+    state,
+    "sea-passability",
+    "Sea passability",
+    "Sea stage: swimmable sea is layer -1 and blocked sea is layer -9.",
+    seeds.sea,
+  );
+  fillLandLayers(state, seeds.land, depth);
+  captureDebugStep(
+    state,
+    "land-levels",
+    "Land levels",
+    "Land stage: walkable land uses layers 1..3 by default and blocked cliffs or mountains use layer 9.",
+    seeds.land,
+  );
+  fillWeather(state, seeds.weather, weatherCoverageLimit);
+  captureDebugStep(
+    state,
+    "weather",
+    "Weather",
+    "Weather stage: special weather overlays are capped by the configured total-surface coverage limit.",
+    seeds.weather,
+  );
   const paths = drawRoads(state);
   const idx = (col: number, row: number) => idxOf(width, col, row);
-  const inBounds = (col: number, row: number) => inBoundsOf(width, height, col, row);
+  const inBounds = (col: number, row: number) => inBoundsOf(width, mapHeight, col, row);
 
-  const mainPath = paths[0]!;
+  const fallback = firstPassableHex(state) ?? hex(0, 0);
+  const mainPath = paths[0] ?? [fallback];
 
   // Strategic features along the main path.
-  const isWater = (t: string) => t === "RIVER" || t === "LAKE" || t === "SEA";
+  const isWater = (cellLayer: number) => cellLayer < 0;
 
   // Bridges where the route runs alongside water.
   for (let i = 1; i < mainPath.length - 1; i++) {
     const cell = mainPath[i]!;
     const nearWater = neighbors(cell).some(
-      (n) => inBounds(n.col, n.row) && isWater(terrain[idx(n.col, n.row)]!),
+      (n) => inBounds(n.col, n.row) && isWater(layer[idx(n.col, n.row)]!),
     );
     if (nearWater && rng.next() < 0.3) {
       terrain[idx(cell.col, cell.row)] = "BRIDGE";
@@ -659,7 +1009,7 @@ export function generateMap(seed: number, width: number, height: number): GameMa
   const clearings = rng.int(3, 6);
   for (let c = 0; c < clearings; c++) {
     const cx = rng.int(4, width - 5);
-    const cy = rng.int(2, height - 3);
+    const cy = rng.int(2, mapHeight - 3);
     const nearPath = mainPath.some(
       (pt) => Math.abs(pt.col - cx) <= 3 && Math.abs(pt.row - cy) <= 2,
     );
@@ -667,58 +1017,242 @@ export function generateMap(seed: number, width: number, height: number): GameMa
     for (const n of [hex(cx, cy), ...neighbors(hex(cx, cy))]) {
       if (!inBounds(n.col, n.row)) continue;
       const t = terrain[idx(n.col, n.row)]!;
-      if (t !== "MOUNTAIN" && t !== "SEA" && rng.next() < 0.8) {
+      if (isRoadPassableLayer(layer[idx(n.col, n.row)]!) && t !== "ROCK_ROAD" && rng.next() < 0.8) {
         terrain[idx(n.col, n.row)] = "GRASSLAND";
-      }
-    }
-  }
-
-  // Storm patches.
-  const storms = rng.int(1, 3);
-  for (let s = 0; s < storms; s++) {
-    const sx = rng.int(2, width - 3);
-    const sy = rng.int(1, height - 2);
-    for (const n of [hex(sx, sy), ...neighbors(hex(sx, sy))]) {
-      if (!inBounds(n.col, n.row)) continue;
-      if (terrain[idx(n.col, n.row)] !== "MOUNTAIN" && rng.next() < 0.6) {
-        terrain[idx(n.col, n.row)] = "STORM";
       }
     }
   }
 
   // Portals: 2–4 edge spawn points, deterministic from `rng`. Min 4-hex
   // separation so they're visibly distinct.
-  const portals = generatePortals(rng, width, height, terrain, idx);
+  const portals = generatePortals(rng, width, mapHeight, layer, idx);
   const portalRoads = drawPortalRoads(state, portals, mainPath[mainPath.length - 1]!);
   paths.push(...portalRoads);
+  captureDebugStep(
+    state,
+    "roads",
+    "Roads",
+    "Road stage: roads only traverse walkable land and can move at most one layer up or down per step.",
+    seeds.road,
+  );
   const roadTiles = buildRoadTiles(state);
 
   // Assemble cells.
   const cells: MapCell[] = [];
-  for (let row = 0; row < height; row++) {
+  for (let row = 0; row < mapHeight; row++) {
     for (let col = 0; col < width; col++) {
       const i = idx(col, row);
       const h = hex(col, row);
       const road = roadTiles.get(hexKey(h));
+      const cellWeather = weather[i];
       cells.push(
         road
-          ? { hex: h, terrain: terrain[i]!, elevation: elevation[i]!, road }
-          : { hex: h, terrain: terrain[i]!, elevation: elevation[i]! },
+          ? {
+              hex: h,
+              terrain: terrain[i]!,
+              layer: layer[i]!,
+              elevation: elevation[i]!,
+              road,
+              ...(cellWeather ? { weather: cellWeather } : {}),
+            }
+          : {
+              hex: h,
+              terrain: terrain[i]!,
+              layer: layer[i]!,
+              elevation: elevation[i]!,
+              ...(cellWeather ? { weather: cellWeather } : {}),
+            },
       );
     }
   }
 
   return {
     seed,
+    layerSeeds: seeds,
+    depth,
+    topology,
     width,
-    height,
+    height: mapHeight,
     cells,
     paths,
     mainPath,
     spawn: mainPath[0]!,
     capitol: mainPath[mainPath.length - 1]!,
     portals,
+    ...(debugSteps ? { debug: { seeds, seaRatio, steps: debugSteps } } : {}),
   };
+}
+
+function firstPassableHex(state: MapGenerationState): Hex | undefined {
+  for (let row = 0; row < state.height; row++) {
+    for (let col = 0; col < state.width; col++) {
+      if (isRoadPassableLayer(state.layer[idxOf(state.width, col, row)]!)) return hex(col, row);
+    }
+  }
+  return undefined;
+}
+
+export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "height" | "debug">): string {
+  if (!map.debug) {
+    throw new Error("renderMapGenerationDebugHtml: map was generated without debug snapshots");
+  }
+  const payload = JSON.stringify({
+    width: map.width,
+    height: map.height,
+    debug: map.debug,
+  }).replace(/</g, "\\u003c");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Terrain Generation Debug</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; color: #1f2933; background: #f7f8fa; }
+    header { padding: 16px 20px; border-bottom: 1px solid #d8dee4; background: #fff; }
+    .topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    .actions { display: flex; gap: 8px; }
+    main { display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 73px); }
+    nav { padding: 12px; border-right: 1px solid #d8dee4; background: #fff; overflow: auto; }
+    button { padding: 10px 12px; border: 1px solid #c8d0d9; border-radius: 6px; background: #fff; cursor: pointer; }
+    nav button { width: 100%; margin: 0 0 8px; text-align: left; }
+    .nav-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+    .nav-actions button { margin: 0; text-align: center; font-weight: 600; }
+    button.active { border-color: #2364aa; box-shadow: inset 3px 0 0 #2364aa; }
+    section { padding: 16px; overflow: auto; }
+    canvas { image-rendering: pixelated; width: 100%; max-width: 1400px; background: #fff; border: 1px solid #d8dee4; }
+    p { max-width: 900px; line-height: 1.45; }
+    .meta { color: #52606d; font-size: 13px; }
+    .seed-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .seed-list span, .step-seed { display: inline-block; padding: 3px 6px; border-radius: 4px; background: #eef2f6; color: #334e68; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="topbar">
+      <div>
+        <strong>Terrain Generation Debug</strong>
+        <div class="meta" id="meta"></div>
+      </div>
+      <div class="actions">
+        <button type="button" id="regenerate">Re-gen current</button>
+        <button type="button" id="reroll">Reroll</button>
+      </div>
+    </div>
+    <div class="seed-list" id="seedList"></div>
+  </header>
+  <main>
+    <nav>
+      <div class="nav-actions">
+        <button type="button" id="regenerateNav">Re-gen</button>
+        <button type="button" id="rerollNav">Reroll</button>
+      </div>
+      <div id="steps"></div>
+    </nav>
+    <section>
+      <h1 id="title"></h1>
+      <div class="step-seed" id="stepSeed"></div>
+      <p id="description"></p>
+      <canvas id="map"></canvas>
+    </section>
+  </main>
+  <script>
+    const DATA = ${payload};
+    const colors = {
+      SEA_MASK: "#b8e7f4",
+      LAND_MASK: "#d7dce0",
+      SHALLOW_WATER: "#74cbe8",
+      SEA: "#256d9b",
+      GRASSLAND: "#78a85f",
+      FOREST: "#3f7d4b",
+      DESERT: "#d3bf73",
+      SWAMP: "#637d54",
+      MOUNTAIN: "#6b7280",
+      STORM: "#5b6172",
+      SNOW: "#e8eef4",
+      VOLCANO: "#8f3d38",
+      ROCK_ROAD: "#8a7352",
+      BRIDGE: "#a88458"
+    };
+    const nav = document.getElementById("steps");
+    const meta = document.getElementById("meta");
+    const seedList = document.getElementById("seedList");
+    const stepSeed = document.getElementById("stepSeed");
+    const regenerate = document.getElementById("regenerate");
+    const reroll = document.getElementById("reroll");
+    const regenerateNav = document.getElementById("regenerateNav");
+    const rerollNav = document.getElementById("rerollNav");
+    const title = document.getElementById("title");
+    const description = document.getElementById("description");
+    const canvas = document.getElementById("map");
+    const ctx = canvas.getContext("2d");
+    canvas.width = DATA.width;
+    canvas.height = DATA.height;
+    const params = new URLSearchParams(window.location.search);
+    const rootSeed = params.get("seed") ?? "12345";
+    meta.textContent = \`Root seed \${rootSeed} | Sea ratio \${Math.round(DATA.debug.seaRatio * 100)}% | Size \${DATA.width} x \${DATA.height}\`;
+    for (const [name, value] of Object.entries(DATA.debug.seeds)) {
+      const item = document.createElement("span");
+      item.textContent = \`\${name}: \${value}\`;
+      seedList.appendChild(item);
+    }
+
+    function regenerateCurrent() {
+      window.location.reload();
+    }
+
+    function rerollSeed() {
+      const next = Math.floor(Math.random() * 2147483647) + 1;
+      params.set("seed", String(next));
+      window.location.search = params.toString();
+    }
+
+    regenerate.addEventListener("click", regenerateCurrent);
+    regenerateNav.addEventListener("click", regenerateCurrent);
+    reroll.addEventListener("click", rerollSeed);
+    rerollNav.addEventListener("click", rerollSeed);
+
+    function colorFor(cell) {
+      if (cell.road) return colors.ROCK_ROAD;
+      if (cell.terrain in colors) return colors[cell.terrain];
+      if (cell.layer === -9) return colors.SEA;
+      if (cell.layer === -1) return colors.SHALLOW_WATER;
+      if (cell.layer === 9) return colors.MOUNTAIN;
+      return colors.GRASSLAND;
+    }
+
+    function showStep(index) {
+      const step = DATA.debug.steps[index];
+      title.textContent = step.title;
+      stepSeed.textContent = \`Step seed: \${step.seed}\`;
+      description.textContent = step.description;
+      const image = ctx.createImageData(DATA.width, DATA.height);
+      for (const cell of step.cells) {
+        const hex = colorFor(cell).slice(1);
+        const offset = (cell.row * DATA.width + cell.col) * 4;
+        image.data[offset] = parseInt(hex.slice(0, 2), 16);
+        image.data[offset + 1] = parseInt(hex.slice(2, 4), 16);
+        image.data[offset + 2] = parseInt(hex.slice(4, 6), 16);
+        image.data[offset + 3] = 255;
+      }
+      ctx.putImageData(image, 0, 0);
+      for (const button of nav.querySelectorAll("button")) button.classList.remove("active");
+      nav.querySelector(\`button[data-index="\${index}"]\`).classList.add("active");
+    }
+
+    DATA.debug.steps.forEach((step, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.index = String(index);
+      button.textContent = \`\${index + 1}. \${step.title} | seed \${step.seed}\`;
+      button.addEventListener("click", () => showStep(index));
+      nav.appendChild(button);
+    });
+    showStep(0);
+  </script>
+</body>
+</html>`;
 }
 
 /** Generate 2–4 portal spawn points on the map edges. */
@@ -726,23 +1260,20 @@ function generatePortals(
   rng: Rng,
   width: number,
   height: number,
-  terrain: readonly string[],
+  layer: readonly number[],
   idx: (col: number, row: number) => number,
 ): Portal[] {
-  const isImpassable = (t: string) =>
-    t === "MOUNTAIN" || t === "SEA" || t === "STORM";
-
   // Candidate edge tiles per side, ordered so the first finite-cost pick wins.
   const candidates: Record<Portal["edge"], Hex[]> = {
     W: [], E: [], N: [], S: [],
   };
   for (let row = 1; row < height - 1; row++) {
-    if (!isImpassable(terrain[idx(0, row)]!)) candidates.W.push(hex(0, row));
-    if (!isImpassable(terrain[idx(width - 1, row)]!)) candidates.E.push(hex(width - 1, row));
+    if (isRoadPassableLayer(layer[idx(0, row)]!)) candidates.W.push(hex(0, row));
+    if (isRoadPassableLayer(layer[idx(width - 1, row)]!)) candidates.E.push(hex(width - 1, row));
   }
   for (let col = 1; col < width - 1; col++) {
-    if (!isImpassable(terrain[idx(col, 0)]!)) candidates.N.push(hex(col, 0));
-    if (!isImpassable(terrain[idx(col, height - 1)]!)) candidates.S.push(hex(col, height - 1));
+    if (isRoadPassableLayer(layer[idx(col, 0)]!)) candidates.N.push(hex(col, 0));
+    if (isRoadPassableLayer(layer[idx(col, height - 1)]!)) candidates.S.push(hex(col, height - 1));
   }
 
   const target = rng.int(2, 4);
