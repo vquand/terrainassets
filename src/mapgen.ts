@@ -1319,6 +1319,12 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     let hexHeight = 1;
     let squareSize = 1;
     let elevationPad = 0;
+    let currentStep = null;
+    let currentCells = [];
+    let currentCellLookup = new Map();
+    let currentVisualEdges = [];
+    let hoveredCellKey = null;
+    let renderSequence = 0;
 
     function configureCanvas() {
       const fitWidth = 1024;
@@ -1365,6 +1371,7 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       zoomMode = zoomMode === "fit" ? "tile30" : "fit";
       zoomToggle.textContent = zoomMode === "fit" ? "Zoom: Fit" : "Zoom: 60px";
       configureCanvas();
+      hoveredCellKey = null;
       void showStep(activeStepIndex);
     });
 
@@ -1443,15 +1450,20 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       ctx.closePath();
     }
 
+    function visibleHexCliffDirs() {
+      return new Set([3, 4, 5]);
+    }
+
+    function hoverVisibleHexCliffDirs() {
+      return new Set([4, 5]);
+    }
+
     function drawHexSideWall(cell, yOffset) {
       if (!hasRaisedLand(cell)) return;
       const top = hexPoints(cell, yOffset);
       const base = hexPoints(cell, 0);
-      const sidePairs = [
-        [1, 2],
-        [2, 3],
-        [3, 4],
-      ];
+      const edgePairs = hexEdgePairs();
+      const sidePairs = [...visibleHexCliffDirs()].map((dir) => edgePairs[dir]);
       for (const [a, b] of sidePairs) {
         ctx.beginPath();
         ctx.moveTo(top[a].x, top[a].y);
@@ -1525,6 +1537,17 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
         ctx.stroke();
       }
       ctx.restore();
+    }
+
+    function hexEdgePairs() {
+      return {
+        0: [0, 1],
+        1: [5, 0],
+        2: [4, 5],
+        3: [3, 4],
+        4: [2, 3],
+        5: [1, 2],
+      };
     }
 
     function drawSquareSideWall(cell, yOffset) {
@@ -1635,28 +1658,235 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       }
     }
 
-    async function showStep(index) {
-      activeStepIndex = index;
-      const step = DATA.debug.steps[index];
-      title.textContent = step.title;
-      stepSeed.textContent = \`Step seed: \${step.seed}\`;
-      description.textContent = step.description;
+    function isInspectableLand(cell) {
+      return cell !== undefined && cell.layer > 0;
+    }
+
+    function sameInspectableLevel(cell, target) {
+      return isInspectableLand(cell) && isInspectableLand(target) && cell.layer === target.layer;
+    }
+
+    function sameLevelComponent(start, cellLookup) {
+      const component = new Set();
+      const queue = [start];
+      component.add(cellKey(start.col, start.row));
+      for (let index = 0; index < queue.length; index++) {
+        const cell = queue[index];
+        for (let dir = 0; dir < 6; dir++) {
+          const n = neighborCoords(cell, dir);
+          const key = cellKey(n.col, n.row);
+          if (component.has(key)) continue;
+          const neighbor = cellLookup.get(key);
+          if (!sameInspectableLevel(neighbor, start)) continue;
+          component.add(key);
+          queue.push(neighbor);
+        }
+      }
+      return component;
+    }
+
+    function hexHoverSegmentFor(cell, dir, neighbor) {
+      const points = hexPoints(cell, elevationOffsetY(cell));
+      const basePoints = hexPoints(cell, 0);
+      const [a, b] = hexEdgePairs()[dir];
+      const visibleCliffDirs = hasRaisedLand(cell) ? hoverVisibleHexCliffDirs() : new Set();
+      let start = points[a];
+      let end = points[b];
+      if (visibleCliffDirs.has(dir)) {
+        const cellOffset = elevationOffsetY(cell);
+        const neighborOffset = neighbor && neighbor.layer > 0 && neighbor.layer < cell.layer ? elevationOffsetY(neighbor) : 0;
+        const ratio = cellOffset === 0 ? 1 : Math.max(0, Math.min(1, (neighborOffset - cellOffset) / -cellOffset));
+        start = {
+          x: points[a].x + (basePoints[a].x - points[a].x) * ratio,
+          y: points[a].y + (basePoints[a].y - points[a].y) * ratio,
+        };
+        end = {
+          x: points[b].x + (basePoints[b].x - points[b].x) * ratio,
+          y: points[b].y + (basePoints[b].y - points[b].y) * ratio,
+        };
+      }
+      return { start, end, vertices: [a, b] };
+    }
+
+    function squareHoverSegmentFor(cell, dir) {
+      const x = cell.col * squareSize;
+      const y = elevationPad + cell.row * squareSize + elevationOffsetY(cell);
+      if (dir === 0) return { start: { x: x + squareSize, y }, end: { x: x + squareSize, y: y + squareSize }, vertices: [0, 1] };
+      if (dir === 1 || dir === 2) return { start: { x, y }, end: { x: x + squareSize, y }, vertices: [1, 2] };
+      if (dir === 3) return { start: { x, y }, end: { x, y: y + squareSize }, vertices: [2, 3] };
+      return { start: { x, y: y + squareSize }, end: { x: x + squareSize, y: y + squareSize }, vertices: [3, 0] };
+    }
+
+    function visualEdgesFor(cells) {
+      const cellLookup = new Map(cells.map((cell) => [cellKey(cell.col, cell.row), cell]));
+      const edges = [];
+      for (const cell of cells) {
+        if (!isInspectableLand(cell)) continue;
+        const key = cellKey(cell.col, cell.row);
+        for (let dir = 0; dir < 6; dir++) {
+          const n = neighborCoords(cell, dir);
+          const neighborKey = cellKey(n.col, n.row);
+          const neighbor = cellLookup.get(neighborKey);
+          const segment = tileShape === "hex" ? hexHoverSegmentFor(cell, dir, neighbor) : squareHoverSegmentFor(cell, dir);
+          edges.push({
+            cellKey: key,
+            neighborKey,
+            dir,
+            layer: cell.layer,
+            segment,
+          });
+        }
+      }
+      return { cellLookup, edges };
+    }
+
+    function drawHoverSegments(segments) {
+      if (segments.length === 0) return;
+      ctx.save();
+      ctx.strokeStyle = "rgba(255, 236, 120, 0.95)";
+      ctx.lineWidth = Math.max(2, Math.round((tileShape === "hex" ? hexRadius : squareSize) * 0.13));
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.shadowColor = "rgba(42, 28, 0, 0.55)";
+      ctx.shadowBlur = Math.max(2, Math.round((tileShape === "hex" ? hexRadius : squareSize) * 0.08));
+      for (const { start, end } of segments) {
+        ctx.beginPath();
+        ctx.moveTo(start.x, start.y);
+        ctx.lineTo(end.x, end.y);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function hoverConnectorSegments(edges) {
+      if (tileShape !== "hex") return [];
+      const byVertex = new Map();
+      for (const edge of edges) {
+        const [a, b] = edge.segment.vertices;
+        const entries = [
+          { vertex: a, point: edge.segment.start },
+          { vertex: b, point: edge.segment.end },
+        ];
+        for (const entry of entries) {
+          const key = edge.cellKey + ":" + entry.vertex;
+          const points = byVertex.get(key) ?? [];
+          points.push(entry.point);
+          byVertex.set(key, points);
+        }
+      }
+
+      const connectors = [];
+      for (const points of byVertex.values()) {
+        if (points.length < 2) continue;
+        let top = points[0];
+        let bottom = points[0];
+        for (const point of points) {
+          if (point.y < top.y) top = point;
+          if (point.y > bottom.y) bottom = point;
+        }
+        if (Math.hypot(top.x - bottom.x, top.y - bottom.y) > 1) connectors.push({ start: top, end: bottom });
+      }
+      return connectors;
+    }
+
+    function drawHoverLevelOverlay(cells) {
+      if (!hoveredCellKey) return;
+      const start = currentCellLookup.get(hoveredCellKey);
+      if (!isInspectableLand(start)) return;
+      const component = sameLevelComponent(start, currentCellLookup);
+      const selectedEdges = currentVisualEdges.filter((edge) => component.has(edge.cellKey) && !component.has(edge.neighborKey));
+      const segments = selectedEdges.map((edge) => edge.segment).concat(hoverConnectorSegments(selectedEdges));
+      drawHoverSegments(segments);
+    }
+
+    function pointInPolygon(point, polygon) {
+      let inside = false;
+      for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        const a = polygon[i];
+        const b = polygon[j];
+        const intersects = ((a.y > point.y) !== (b.y > point.y))
+          && (point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x);
+        if (intersects) inside = !inside;
+      }
+      return inside;
+    }
+
+    function canvasPointFromEvent(event) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: (event.clientX - rect.left) * (canvas.width / rect.width),
+        y: (event.clientY - rect.top) * (canvas.height / rect.height),
+      };
+    }
+
+    function cellAtPoint(point) {
+      for (let index = currentCells.length - 1; index >= 0; index--) {
+        const cell = currentCells[index];
+        if (tileShape === "hex") {
+          if (pointInPolygon(point, hexPoints(cell, elevationOffsetY(cell)))) return cell;
+        } else {
+          const x = cell.col * squareSize;
+          const y = elevationPad + cell.row * squareSize + elevationOffsetY(cell);
+          if (point.x >= x && point.x <= x + squareSize && point.y >= y && point.y <= y + squareSize) return cell;
+        }
+      }
+      return null;
+    }
+
+    async function renderCurrentStep() {
+      if (!currentStep) return;
+      const sequence = ++renderSequence;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      const cells = drawOrder(step.cells);
-      if (step.id === "sprite-fill") {
-        await Promise.all(cells.map((cell) => preloadCellSprites(cell)));
-        for (const cell of cells) await drawSpriteCell(cell, step);
+      if (currentStep.id === "sprite-fill") {
+        for (const cell of currentCells) {
+          if (sequence !== renderSequence) return;
+          await drawSpriteCell(cell, currentStep);
+        }
       } else {
-        for (const cell of cells) {
-          const color = colorFor(cell, step);
+        for (const cell of currentCells) {
+          const color = colorFor(cell, currentStep);
           if (tileShape === "hex") drawHexCell(cell, color);
           else drawSquareCell(cell, color);
         }
       }
-      drawRaisedRimOverlay(cells);
+      if (sequence !== renderSequence) return;
+      drawRaisedRimOverlay(currentCells);
+      drawHoverLevelOverlay(currentCells);
+    }
+
+    async function showStep(index) {
+      activeStepIndex = index;
+      const step = DATA.debug.steps[index];
+      currentStep = step;
+      currentCells = drawOrder(step.cells);
+      const visualEdges = visualEdgesFor(currentCells);
+      currentCellLookup = visualEdges.cellLookup;
+      currentVisualEdges = visualEdges.edges;
+      hoveredCellKey = null;
+      title.textContent = step.title;
+      stepSeed.textContent = \`Step seed: \${step.seed}\`;
+      description.textContent = step.description;
+      if (step.id === "sprite-fill") {
+        await Promise.all(currentCells.map((cell) => preloadCellSprites(cell)));
+      }
+      await renderCurrentStep();
       for (const button of nav.querySelectorAll("button")) button.classList.remove("active");
       nav.querySelector(\`button[data-index="\${index}"]\`).classList.add("active");
     }
+
+    canvas.addEventListener("mousemove", (event) => {
+      const cell = cellAtPoint(canvasPointFromEvent(event));
+      const nextKey = isInspectableLand(cell) ? cellKey(cell.col, cell.row) : null;
+      if (nextKey === hoveredCellKey) return;
+      hoveredCellKey = nextKey;
+      void renderCurrentStep();
+    });
+
+    canvas.addEventListener("mouseleave", () => {
+      if (!hoveredCellKey) return;
+      hoveredCellKey = null;
+      void renderCurrentStep();
+    });
 
     DATA.debug.steps.forEach((step, index) => {
       const button = document.createElement("button");

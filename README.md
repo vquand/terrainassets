@@ -181,4 +181,6 @@ views, higher walkable land levels are drawn slightly raised with a brown side
 wall. A bold border is drawn only on the raised tile's top surface where it
 meets a lower adjacent land tile. The two lower/front hex edges are skipped
 because the brown elevated wall already communicates that drop, and the brown
-wall itself is not highlighted.
+wall itself is not highlighted. Hovering a land tile highlights precomputed
+visible boundary edges for the contiguous land area at that same layer,
+including visible front cliff edges where raised land drops to a lower level.
