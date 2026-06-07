@@ -1402,7 +1402,7 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
 
     function roadSpritePathFor(cell) {
       if (!cell.roadTile) return null;
-      return \`/sprites/terrain/rock-road/\${cell.roadTile.variant}-r\${cell.roadTile.rotation}.png\`;
+      return \`/sprites/roads/rock-road/\${cell.roadTile.variant}-r\${cell.roadTile.rotation}.png\`;
     }
 
     const spriteCache = new Map();
