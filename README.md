@@ -34,6 +34,7 @@ src/
 sprites/
   terrain/              terrain tile sprites
     simplified/         simplified terrain tile set
+  roads/                road overlay sprites
     rock-road/          connected road tile variants
 ```
 
@@ -132,7 +133,7 @@ per-stage seeds unless a caller passes explicit seed overrides.
    The final stage resolves the generated terrain codes and road overlays into
    sprite-ready tile values and renders the PNG assets from `sprites/`. The
    base terrain sprite is rendered first, then any road sprite from
-   `sprites/terrain/rock-road` is rendered on top. The debug site can display
+   `sprites/roads/rock-road` is rendered on top. The debug site can display
    either pointy-top hex tiles or square tiles. Hex is the default shape.
 
 ## Debug HTML
