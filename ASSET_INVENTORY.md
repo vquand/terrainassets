@@ -21,7 +21,7 @@ Status legend:
 | Folder | Status | Notes |
 |---|---|---|
 | `sprites/terrain/` | Present | Contains terrain sprites and weather-like sprites today. |
-| `sprites/weather/` | Missing | Should contain weather/effect overlays. |
+| `sprites/weather/` | Present | Contains transparent weather/effect overlays. |
 | `sprites/roads/` | Present | Contains road overlays and road variant metadata. |
 
 ## Terrain Base Tiles
@@ -70,11 +70,16 @@ These are useful if plain, hill, and plateau should have different base art inst
 ## Weather Overlays
 
 Weather sprites should be transparent overlays in `sprites/weather/`, not base terrain tiles.
+Map generation should only emit weather types with matching files in this folder.
 
 | Asset | Status | Current path | Target path | Notes |
 |---|---|---|---|---|
-| `rain` | Missing | N/A | `sprites/weather/rain.png` | Movement/visibility penalty candidate. |
-| `storm` | Misplaced | `sprites/terrain/storm.png` | `sprites/weather/storm.png` | Move if it is an overlay effect. |
+| `rain` | Present | `sprites/weather/rain.png` | `sprites/weather/rain.png` | Movement/visibility penalty candidate. |
+| `storm` | Present | `sprites/weather/storm.png` | `sprites/weather/storm.png` | Storm cloud overlay with lightning. |
+| `tornado` | Present | `sprites/weather/tornado.png` | `sprites/weather/tornado.png` | Tornado hazard overlay. |
+| `deadly-tornado` | Present | `sprites/weather/deadly-tornado.png` | `sprites/weather/deadly-tornado.png` | Severe tornado hazard overlay. |
+| `burning-ground` | Present | `sprites/weather/burning-ground.png` | `sprites/weather/burning-ground.png` | Fire ground-effect overlay. |
+| `evil-burning-ground` | Present | `sprites/weather/evil-burning-ground.png` | `sprites/weather/evil-burning-ground.png` | Corrupted fire ground-effect overlay. |
 | `snow` | Needs decision | `sprites/terrain/snow.png` | `sprites/weather/snow.png` | Move if weather overlay; otherwise rename terrain to `snowfield.png`. |
 | `fog` | Missing | N/A | `sprites/weather/fog.png` | Visibility penalty candidate. |
 | `sandstorm` | Missing | N/A | `sprites/weather/sandstorm.png` | Desert weather candidate. |
@@ -108,6 +113,5 @@ These are not required for version one, but they would improve map readability.
 
 ## Migration Tasks
 
-1. Create `sprites/weather/`.
-2. Decide whether `snow.png`, `storm.png`, `swamp.png`, and `volcano.png` are terrain bases or weather overlays.
-3. Add missing weather overlays as transparent sprites.
+1. Decide whether `snow.png`, `swamp.png`, and `volcano.png` are terrain bases or weather overlays.
+2. Add remaining missing weather overlays as transparent sprites.

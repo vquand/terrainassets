@@ -31,12 +31,21 @@ src/
   hex.ts                pointy-top odd-r hex grid math
   mapgen.ts             deterministic terrain/map generation
   rng.ts                deterministic RNG used by mapgen
+input/                  gitignored raw sprite sheets and temporary inputs
+output/                 gitignored splitter output and intermediate files
 sprites/
   terrain/              terrain tile sprites
     simplified/         simplified terrain tile set
+  weather/              weather and hazard overlay sprites
   roads/                road overlay sprites
     rock-road/          connected road tile variants
+tools/
+  split/                sprite sheet splitting helpers
 ```
+
+Map generation keeps terrain and overlays separate: base terrain codes must
+resolve to tracked terrain sprites, and generated weather types must resolve to
+tracked files in `sprites/weather/`.
 
 The current source game links `sprites/terrain` into
 `apps/web/public/sprites/terrain` and imports map generation through the
