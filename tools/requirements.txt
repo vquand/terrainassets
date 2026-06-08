@@ -1,0 +1,9 @@
+# Python dependencies for everything in tools/.
+# Install once into a local venv (see tools/README.md "Setup"):
+#   python -m venv tools/.venv
+#   tools/.venv/Scripts/python.exe -m pip install -r tools/requirements.txt
+Pillow>=10.0
+# HEIC/HEIF support for iPhone photos. Adds Image.open() support for .heic
+# files; optional — split.py and trace.py still work without it for
+# PNG/JPG inputs but skip HEIC silently.
+pillow-heif>=0.18

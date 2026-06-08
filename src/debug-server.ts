@@ -10,10 +10,13 @@ import {
   type GenerateMapOptions,
   type TileShape,
   type TopologyMode,
+  type WeatherType,
 } from "./mapgen.js";
 
 const DEFAULT_PORT = 5999;
 const DEFAULT_HOST = "0.0.0.0";
+const DEFAULT_DEBUG_WIDTH = 180;
+const DEFAULT_DEBUG_HEIGHT = 100;
 const SPRITES_ROOT = path.resolve("sprites");
 
 function argValue(name: string): string | undefined {
@@ -44,11 +47,23 @@ function tileShapeParam(value: string | null): TileShape {
   return value === "square" || value === "hex" ? value : "hex";
 }
 
+function weatherTypeParam(value: string | null): WeatherType | undefined {
+  return value === "RAIN" ||
+    value === "STORM" ||
+    value === "TORNADO" ||
+    value === "DEADLY_TORNADO" ||
+    value === "BURNING_GROUND" ||
+    value === "EVIL_BURNING_GROUND"
+    ? value
+    : undefined;
+}
+
 function generateDebugHtml(url: URL): string {
   const seed = intParam(url.searchParams.get("seed"), 12345);
+  const weatherType = weatherTypeParam(url.searchParams.get("weatherType"));
   const options: GenerateMapOptions = {
-    width: intParam(url.searchParams.get("width"), 1000),
-    height: intParam(url.searchParams.get("height"), 500),
+    width: intParam(url.searchParams.get("width"), DEFAULT_DEBUG_WIDTH),
+    height: intParam(url.searchParams.get("height"), DEFAULT_DEBUG_HEIGHT),
     depth: intParam(url.searchParams.get("depth"), 4),
     topology: topologyParam(url.searchParams.get("topology")),
     tileShape: tileShapeParam(url.searchParams.get("tileShape")),
@@ -56,6 +71,7 @@ function generateDebugHtml(url: URL): string {
     blockedSeaRatio: floatParam(url.searchParams.get("blockedSeaRatio"), 0.2),
     blockedLandRatio: floatParam(url.searchParams.get("blockedLandRatio"), 0.1),
     weatherCoverageLimit: floatParam(url.searchParams.get("weatherCoverageLimit"), 0.25),
+    ...(weatherType ? { weatherType } : {}),
     debug: true,
   };
   return renderMapGenerationDebugHtml(generateMap(seed, options));

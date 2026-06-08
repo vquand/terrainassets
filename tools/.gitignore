@@ -1,0 +1,7 @@
+# Python venv created on demand.
+.venv/
+
+# Python cache artifacts.
+__pycache__/
+*.pyc
+*.pyo

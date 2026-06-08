@@ -30,8 +30,15 @@ debug/
 debug-output/
 *.debug.html
 terrain-debug*.html
+debug-server*.log
 *.cpuprofile
 *.heapsnapshot
+
+# Sprite tool scratch folders
+input/
+output/
+sprites/input/
+sprites/output/
 
 # Editor and OS files
 .DS_Store

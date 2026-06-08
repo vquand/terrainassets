@@ -13,7 +13,7 @@
 // is the only engine we target: browser, Electron, Node).
 
 import { Rng } from "./rng.js";
-import { hex, hexesInRange, hexKey, hexLine, neighbor, neighbors, type Hex } from "./hex.js";
+import { hex, hexDistance, hexesInRange, hexKey, hexLine, neighbor, neighbors, type Hex } from "./hex.js";
 
 export type RoadVariant =
   | "straight"
@@ -115,7 +115,13 @@ export interface RoadTile {
 export type TopologyMode = "full" | "land" | "sea";
 export type TileShape = "hex" | "square";
 export type LandHeight = "plain" | "hill" | "plateau";
-export type WeatherType = "STORM" | "SNOW" | "VOLCANO" | "SWAMP";
+export type WeatherType =
+  | "RAIN"
+  | "STORM"
+  | "TORNADO"
+  | "DEADLY_TORNADO"
+  | "BURNING_GROUND"
+  | "EVIL_BURNING_GROUND";
 
 export interface LayerSeeds {
   readonly ratio: number;
@@ -142,6 +148,8 @@ export interface GenerateMapOptions {
   readonly blockedLandRatio?: number;
   /** Maximum special-weather surface coverage, as a fraction of total cells. Default 0.25. */
   readonly weatherCoverageLimit?: number;
+  /** Optional debug/test override. When set, weather generation uses only this overlay type. */
+  readonly weatherType?: WeatherType;
   /** Optional per-step seed overrides. Missing seeds are derived from the root seed. */
   readonly seeds?: Partial<LayerSeeds>;
   /** Capture generation snapshots suitable for renderMapGenerationDebugHtml. */
@@ -360,6 +368,20 @@ const DEFAULT_BLOCKED_SEA_RATIO = 0.2;
 const DEFAULT_BLOCKED_LAND_RATIO = 0.1;
 const DEFAULT_ROAD_DENSITY = 0.09642857142857142;
 
+function canHostWeather(layer: number): boolean {
+  return layer !== -9 && layer !== 9;
+}
+
+function canHostWeatherType(layer: number, type: WeatherType): boolean {
+  if (!canHostWeather(layer)) return false;
+  if (type === "BURNING_GROUND" || type === "EVIL_BURNING_GROUND") return layer > 0;
+  return true;
+}
+
+function weatherTypesForLayer(layer: number, types: readonly WeatherType[]): WeatherType[] {
+  return types.filter((type) => canHostWeatherType(layer, type));
+}
+
 interface ResolvedGenerateMapOptions {
   readonly width: number;
   readonly height: number;
@@ -370,6 +392,7 @@ interface ResolvedGenerateMapOptions {
   readonly blockedSeaRatio: number;
   readonly blockedLandRatio: number;
   readonly weatherCoverageLimit: number;
+  readonly weatherType?: WeatherType;
   readonly seeds: LayerSeeds;
   readonly debug: boolean;
 }
@@ -403,6 +426,7 @@ function resolveGenerateMapOptions(
     blockedSeaRatio: clamp01(raw?.blockedSeaRatio ?? DEFAULT_BLOCKED_SEA_RATIO),
     blockedLandRatio: clamp01(raw?.blockedLandRatio ?? DEFAULT_BLOCKED_LAND_RATIO),
     weatherCoverageLimit: clamp01(raw?.weatherCoverageLimit ?? 0.25),
+    ...(raw?.weatherType ? { weatherType: raw.weatherType } : {}),
     seeds: deriveSeeds(seed, raw?.seeds),
     debug: raw?.debug ?? false,
   };
@@ -469,6 +493,7 @@ function joinWaypoints(points: readonly Hex[]): Hex[] {
 
 interface MapGenerationState {
   readonly rng: Rng;
+  readonly roadNoiseSeed: number;
   readonly width: number;
   readonly height: number;
   readonly terrain: string[];
@@ -673,29 +698,37 @@ function fillLandLayers(state: MapGenerationState, seed: number, depth: number, 
   }
 }
 
-function fillWeather(state: MapGenerationState, seed: number, coverageLimit: number): void {
+function fillWeather(
+  state: MapGenerationState,
+  seed: number,
+  coverageLimit: number,
+  forcedWeatherType?: WeatherType,
+): void {
   if (coverageLimit <= 0) return;
-  const { rng, width, height, terrain, layer, weather } = state;
-  const maxWeatherCells = Math.floor(width * height * coverageLimit);
-  if (maxWeatherCells === 0) return;
+  const { width, height, layer, weather } = state;
   const weatherRng = new Rng(seed);
-  const types: readonly WeatherType[] = ["STORM", "SNOW", "VOLCANO", "SWAMP"];
-  let covered = 0;
-  const targetPatches = Math.max(1, Math.round(Math.sqrt(maxWeatherCells) / 2));
+  const types: readonly WeatherType[] = forcedWeatherType
+    ? [forcedWeatherType]
+    : [
+        "RAIN",
+        "STORM",
+        "TORNADO",
+        "DEADLY_TORNADO",
+        "BURNING_GROUND",
+        "EVIL_BURNING_GROUND",
+      ];
 
-  for (let patch = 0; patch < targetPatches && covered < maxWeatherCells; patch++) {
-    const center = hex(weatherRng.int(0, width - 1), weatherRng.int(0, height - 1));
-    const radius = weatherRng.int(1, Math.max(1, Math.round(Math.min(width, height) * 0.035)));
-    const type = weatherRng.pick(types);
-    for (const cell of hexesInRange(center, radius)) {
-      if (!inBoundsOf(width, height, cell.col, cell.row) || covered >= maxWeatherCells) continue;
-      const i = idxOf(width, cell.col, cell.row);
-      if (!isRoadPassableLayer(layer[i]!) || weather[i]) continue;
-      if (rng.next() > 0.72) continue;
-      weather[i] = type;
-      terrain[i] = type;
-      covered++;
+  const candidates: number[] = [];
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
+      const i = idxOf(width, col, row);
+      if (weatherTypesForLayer(layer[i]!, types).length > 0 && !weather[i]) candidates.push(i);
     }
+  }
+
+  const targetWeatherCells = Math.floor(candidates.length * coverageLimit);
+  for (const i of weatherRng.shuffle(candidates).slice(0, targetWeatherCells)) {
+    weather[i] = weatherRng.pick(weatherTypesForLayer(layer[i]!, types));
   }
 }
 
@@ -706,26 +739,64 @@ function canRoadStep(state: MapGenerationState, from: Hex, to: Hex): boolean {
   return isRoadPassableLayer(toLayer) && Math.abs(fromLayer - toLayer) <= 1;
 }
 
+function roadFeatureAffinity(state: MapGenerationState, cell: Hex): number {
+  let affinity = 0;
+  for (const n of neighbors(cell)) {
+    if (!inBoundsOf(state.width, state.height, n.col, n.row)) continue;
+    const i = idxOf(state.width, n.col, n.row);
+    const terrain = state.terrain[i]!;
+    const layer = state.layer[i]!;
+    if (layer < 0 || terrain === "LAKE" || terrain === "RIVER") affinity += 1.4;
+    if (layer === 9 || terrain === "MOUNTAIN") affinity += 1.1;
+  }
+  return Math.min(3.5, affinity);
+}
+
+function roadStepCost(state: MapGenerationState, from: Hex, to: Hex, previous: Hex | undefined, end: Hex): number {
+  const toIndex = idxOf(state.width, to.col, to.row);
+  const fromLayer = state.layer[idxOf(state.width, from.col, from.row)]!;
+  const toLayer = state.layer[toIndex]!;
+  const terrain = state.terrain[toIndex]!;
+  let cost = 9;
+  cost += Math.abs(toLayer - fromLayer) * 3.5;
+  cost -= roadFeatureAffinity(state, to);
+  if (terrain === "GRASSLAND" && roadFeatureAffinity(state, to) === 0) cost += 1.2;
+  if (previous) {
+    const prevDir = directionBetween(previous, from);
+    const nextDir = directionBetween(from, to);
+    if (prevDir !== undefined && nextDir !== undefined) {
+      if (prevDir === nextDir) cost += 2.4;
+      else if (Math.abs(prevDir - nextDir) === 3) cost += 4;
+      else cost -= 0.6;
+    }
+  }
+  cost += noise(to.col / 7, to.row / 7, state.roadNoiseSeed + end.col * 31 + end.row * 17) * 1.1;
+  return Math.max(1.5, cost);
+}
+
 function findRoadPath(state: MapGenerationState, start: Hex, end: Hex): Hex[] {
   const startLayer = state.layer[idxOf(state.width, start.col, start.row)]!;
   const endLayer = state.layer[idxOf(state.width, end.col, end.row)]!;
   if (!isRoadPassableLayer(startLayer) || !isRoadPassableLayer(endLayer)) return [];
 
-  const queue: Hex[] = [start];
+  const queue: { cell: Hex; priority: number }[] = [{ cell: start, priority: 0 }];
   const cameFrom = new Map<string, Hex | null>([[hexKey(start), null]]);
-  for (let head = 0; head < queue.length; head++) {
-    const cur = queue[head]!;
+  const costSoFar = new Map<string, number>([[hexKey(start), 0]]);
+  while (queue.length > 0) {
+    queue.sort((a, b) => a.priority - b.priority);
+    const cur = queue.shift()!.cell;
     if (cur.col === end.col && cur.row === end.row) break;
-    const nextCells = neighbors(cur).sort(
-      (a, b) =>
-        hexDistanceForSort(a, end) - hexDistanceForSort(b, end) ||
-        Math.abs(a.row - end.row) - Math.abs(b.row - end.row),
-    );
+    const curKey = hexKey(cur);
+    const previous = cameFrom.get(curKey) ?? undefined;
+    const nextCells = neighbors(cur).sort((a, b) => roadStepCost(state, cur, a, previous ?? undefined, end) - roadStepCost(state, cur, b, previous ?? undefined, end));
     for (const next of nextCells) {
       const key = hexKey(next);
-      if (cameFrom.has(key) || !canRoadStep(state, cur, next)) continue;
+      if (!canRoadStep(state, cur, next)) continue;
+      const newCost = costSoFar.get(curKey)! + roadStepCost(state, cur, next, previous ?? undefined, end);
+      if (costSoFar.has(key) && newCost >= costSoFar.get(key)!) continue;
+      costSoFar.set(key, newCost);
       cameFrom.set(key, cur);
-      queue.push(next);
+      queue.push({ cell: next, priority: newCost + hexDistance(next, end) * 7 });
     }
   }
 
@@ -1033,6 +1104,7 @@ export function generateMap(
     blockedSeaRatio,
     blockedLandRatio,
     weatherCoverageLimit,
+    weatherType,
     seeds,
   } = resolved;
   const rng = new Rng(seeds.road);
@@ -1045,6 +1117,7 @@ export function generateMap(
   const debugSteps = resolved.debug ? [] : undefined;
   const state: MapGenerationState = {
     rng,
+    roadNoiseSeed: seeds.road,
     width,
     height: mapHeight,
     terrain,
@@ -1077,12 +1150,12 @@ export function generateMap(
     "Land stage: walkable land uses three named height levels by default: plain (layer 1), hill (layer 2), and plateau (layer 3). Blocked cliffs or mountains use layer 9.",
     seeds.land,
   );
-  fillWeather(state, seeds.weather, weatherCoverageLimit);
+  fillWeather(state, seeds.weather, weatherCoverageLimit, weatherType);
   captureDebugStep(
     state,
     "weather",
     "Weather",
-    "Weather stage: special weather overlays are capped by the configured total-surface coverage limit.",
+    "Weather stage: special weather overlays can appear on land and shallow sea, capped by the configured surface coverage limit.",
     seeds.weather,
   );
   const targetRoadTiles = Math.round(countLandTiles(state) * roadDensity);
@@ -1243,6 +1316,12 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     .meta { color: #52606d; font-size: 13px; }
     .seed-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .seed-list span, .step-seed { display: inline-block; padding: 3px 6px; border-radius: 4px; background: #eef2f6; color: #334e68; font-size: 12px; }
+    .weather-panel { display: none; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; margin: 0 0 12px; border: 1px solid #d8dee4; border-radius: 6px; background: #fff; }
+    .weather-panel.visible { display: flex; }
+    .weather-panel label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #334e68; }
+    .weather-panel select, .weather-panel input { min-height: 34px; }
+    .weather-panel input[type="range"] { width: 170px; }
+    .weather-density-value { min-width: 44px; font-size: 13px; color: #52606d; }
   </style>
 </head>
 <body>
@@ -1272,6 +1351,26 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       <h1 id="title"></h1>
       <div class="step-seed" id="stepSeed"></div>
       <p id="description"></p>
+      <div class="weather-panel" id="weatherPanel">
+        <label>
+          Weather
+          <select id="weatherTypeSelect">
+            <option value="">Mixed</option>
+            <option value="RAIN">Rain</option>
+            <option value="STORM">Storm</option>
+            <option value="TORNADO">Tornado</option>
+            <option value="DEADLY_TORNADO">Deadly tornado</option>
+            <option value="BURNING_GROUND">Burning ground</option>
+            <option value="EVIL_BURNING_GROUND">Evil burning ground</option>
+          </select>
+        </label>
+        <label>
+          Density
+          <input id="weatherDensity" type="range" min="0" max="1" step="0.01">
+        </label>
+        <span class="weather-density-value" id="weatherDensityValue"></span>
+        <button type="button" id="applyWeatherTest">Apply</button>
+      </div>
       <div class="viewport">
         <canvas id="map"></canvas>
       </div>
@@ -1292,8 +1391,12 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       DESERT: "#d3bf73",
       SWAMP: "#637d54",
       MOUNTAIN: "#6b7280",
+      RAIN: "#35a9d6",
       STORM: "#5b6172",
-      SNOW: "#e8eef4",
+      TORNADO: "#8eb8c9",
+      DEADLY_TORNADO: "#c7cbd0",
+      BURNING_GROUND: "#ef7c25",
+      EVIL_BURNING_GROUND: "#8d35b8",
       VOLCANO: "#8f3d38",
       ROCK_ROAD: "#8a7352",
       BRIDGE: "#a88458"
@@ -1309,6 +1412,11 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     const rerollNav = document.getElementById("rerollNav");
     const title = document.getElementById("title");
     const description = document.getElementById("description");
+    const weatherPanel = document.getElementById("weatherPanel");
+    const weatherTypeSelect = document.getElementById("weatherTypeSelect");
+    const weatherDensity = document.getElementById("weatherDensity");
+    const weatherDensityValue = document.getElementById("weatherDensityValue");
+    const applyWeatherTest = document.getElementById("applyWeatherTest");
     const canvas = document.getElementById("map");
     const ctx = canvas.getContext("2d");
     const tileShape = DATA.debug.tileShape ?? "hex";
@@ -1346,6 +1454,22 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     configureCanvas();
     const params = new URLSearchParams(window.location.search);
     const rootSeed = params.get("seed") ?? "12345";
+    const weatherTypes = new Set([
+      "RAIN",
+      "STORM",
+      "TORNADO",
+      "DEADLY_TORNADO",
+      "BURNING_GROUND",
+      "EVIL_BURNING_GROUND"
+    ]);
+    const initialWeatherType = params.get("weatherType");
+    if (weatherTypes.has(initialWeatherType)) weatherTypeSelect.value = initialWeatherType;
+    const initialWeatherDensity = Math.max(0, Math.min(1, Number.parseFloat(params.get("weatherCoverageLimit") ?? "0.25")));
+    weatherDensity.value = Number.isFinite(initialWeatherDensity) ? String(initialWeatherDensity) : "0.25";
+    function updateWeatherDensityValue() {
+      weatherDensityValue.textContent = \`\${Math.round(Number(weatherDensity.value) * 100)}%\`;
+    }
+    updateWeatherDensityValue();
     meta.textContent = \`Root seed \${rootSeed} | Shape \${tileShape} | Sea ratio \${Math.round(DATA.debug.seaRatio * 100)}% | Size \${DATA.width} x \${DATA.height}\`;
     for (const [name, value] of Object.entries(DATA.debug.seeds)) {
       const item = document.createElement("span");
@@ -1367,6 +1491,15 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     regenerateNav.addEventListener("click", regenerateCurrent);
     reroll.addEventListener("click", rerollSeed);
     rerollNav.addEventListener("click", rerollSeed);
+    weatherDensity.addEventListener("input", updateWeatherDensityValue);
+    applyWeatherTest.addEventListener("click", () => {
+      const selectedWeather = weatherTypeSelect.value;
+      if (weatherTypes.has(selectedWeather)) params.set("weatherType", selectedWeather);
+      else params.delete("weatherType");
+      params.set("weatherCoverageLimit", String(Number(weatherDensity.value)));
+      params.set("step", "weather");
+      window.location.search = params.toString();
+    });
     zoomToggle.addEventListener("click", () => {
       zoomMode = zoomMode === "fit" ? "tile30" : "fit";
       zoomToggle.textContent = zoomMode === "fit" ? "Zoom: Fit" : "Zoom: 60px";
@@ -1384,6 +1517,11 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
 
     function colorFor(cell, step) {
       if (cell.road) return colors.ROCK_ROAD;
+      if (cell.weather && cell.weather in colors) return colors[cell.weather];
+      return terrainColorFor(cell, step);
+    }
+
+    function terrainColorFor(cell, step) {
       if (step.id === "land-levels") {
         const heightColor = landHeightColor(cell);
         if (heightColor) return heightColor;
@@ -1395,9 +1533,40 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       return colors.GRASSLAND;
     }
 
+    const terrainSpritePathByCode = {
+      BRIDGE: "/sprites/terrain/simplified/bridge.png",
+      DESERT: "/sprites/terrain/simplified/desert.png",
+      FOREST: "/sprites/terrain/simplified/forest.png",
+      GRASSLAND: "/sprites/terrain/simplified/grassland.png",
+      LAKE: "/sprites/terrain/simplified/lake.png",
+      MOUNTAIN: "/sprites/terrain/simplified/mountain.png",
+      RIVER: "/sprites/terrain/simplified/river.png",
+      ROCK_ROAD: "/sprites/terrain/simplified/rock-road.png",
+      RUINS: "/sprites/terrain/simplified/ruins.png",
+      SEA: "/sprites/terrain/simplified/sea.png",
+      SHALLOW_WATER: "/sprites/terrain/simplified/shallow-water.png",
+      SNOW: "/sprites/terrain/simplified/snow.png",
+      STORM: "/sprites/terrain/simplified/storm.png",
+      SWAMP: "/sprites/terrain/simplified/swamp.png",
+      VOLCANO: "/sprites/terrain/simplified/volcano.png"
+    };
+
+    const weatherSpritePathByType = {
+      RAIN: "/sprites/weather/rain.png",
+      STORM: "/sprites/weather/storm.png",
+      TORNADO: "/sprites/weather/tornado.png",
+      DEADLY_TORNADO: "/sprites/weather/deadly-tornado.png",
+      BURNING_GROUND: "/sprites/weather/burning-ground.png",
+      EVIL_BURNING_GROUND: "/sprites/weather/evil-burning-ground.png"
+    };
+
     function spritePathFor(cell) {
-      const name = cell.terrain.toLowerCase().replace(/_/g, "-");
-      return \`/sprites/terrain/simplified/\${name}.png\`;
+      return terrainSpritePathByCode[cell.terrain] ?? null;
+    }
+
+    function weatherSpritePathFor(cell) {
+      if (!cell.weather) return null;
+      return weatherSpritePathByType[cell.weather] ?? null;
     }
 
     function roadSpritePathFor(cell) {
@@ -1602,45 +1771,79 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     }
 
     async function preloadCellSprites(cell) {
-      const sources = [spritePathFor(cell)];
+      const sources = [];
+      const basePath = spritePathFor(cell);
+      const weatherPath = weatherSpritePathFor(cell);
       const roadPath = roadSpritePathFor(cell);
+      if (basePath) sources.push(basePath);
+      if (weatherPath) sources.push(weatherPath);
       if (roadPath) sources.push(roadPath);
       await Promise.all(sources.map((src) => loadSprite(src)));
+    }
+
+    async function preloadWeatherSprite(cell) {
+      const weatherPath = weatherSpritePathFor(cell);
+      if (weatherPath) await loadSprite(weatherPath);
+    }
+
+    function drawCellImage(cell, yOffset, image, scale = 1) {
+      if (tileShape === "hex") {
+        const box = clipHexCell(cell, yOffset);
+        const width = box.width * scale;
+        const height = box.height * scale;
+        ctx.save();
+        ctx.clip();
+        ctx.drawImage(image, box.x + (box.width - width) / 2, box.y + (box.height - height) / 2, width, height);
+        ctx.restore();
+      } else {
+        const size = squareSize * scale;
+        ctx.drawImage(
+          image,
+          cell.col * squareSize + (squareSize - size) / 2,
+          elevationPad + cell.row * squareSize + yOffset + (squareSize - size) / 2,
+          size,
+          size,
+        );
+      }
     }
 
     async function drawSpriteCell(cell, step) {
       const yOffset = elevationOffsetY(cell);
       if (tileShape === "hex") drawHexSideWall(cell, yOffset);
       else drawSquareSideWall(cell, yOffset);
-      const baseImage = await loadSprite(spritePathFor(cell));
+      const basePath = spritePathFor(cell);
+      const baseImage = basePath ? await loadSprite(basePath) : null;
       if (!baseImage) {
         const color = colorFor(cell, step);
         if (tileShape === "hex") drawHexCell(cell, color, yOffset);
         else drawSquareCell(cell, color, yOffset);
-      } else if (tileShape === "hex") {
-        const box = clipHexCell(cell, yOffset);
-        ctx.save();
-        ctx.clip();
-        ctx.drawImage(baseImage, box.x, box.y, box.width, box.height);
-        ctx.restore();
       } else {
-        ctx.drawImage(baseImage, cell.col * squareSize, elevationPad + cell.row * squareSize + yOffset, squareSize, squareSize);
+        drawCellImage(cell, yOffset, baseImage);
       }
 
       const roadPath = roadSpritePathFor(cell);
-      if (!roadPath) return;
-      const roadImage = await loadSprite(roadPath);
-      if (!roadImage) return;
-      if (tileShape === "hex") {
-        const box = clipHexCell(cell, yOffset);
-        ctx.save();
-        ctx.clip();
-        ctx.drawImage(roadImage, box.x, box.y, box.width, box.height);
-        ctx.restore();
-      } else {
-        ctx.drawImage(roadImage, cell.col * squareSize, elevationPad + cell.row * squareSize + yOffset, squareSize, squareSize);
+      if (roadPath) {
+        const roadImage = await loadSprite(roadPath);
+        if (roadImage) drawCellImage(cell, yOffset, roadImage);
       }
 
+      const weatherPath = weatherSpritePathFor(cell);
+      if (weatherPath) {
+        const weatherImage = await loadSprite(weatherPath);
+        if (weatherImage) drawCellImage(cell, yOffset, weatherImage, 0.8);
+      }
+    }
+
+    async function drawWeatherCell(cell, step) {
+      const yOffset = elevationOffsetY(cell);
+      const color = terrainColorFor(cell, step);
+      if (tileShape === "hex") drawHexCell(cell, color, yOffset);
+      else drawSquareCell(cell, color, yOffset);
+
+      const weatherPath = weatherSpritePathFor(cell);
+      if (!weatherPath) return;
+      const weatherImage = await loadSprite(weatherPath);
+      if (weatherImage) drawCellImage(cell, yOffset, weatherImage, 0.8);
     }
 
     function drawOrder(cells) {
@@ -1837,7 +2040,12 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       if (!currentStep) return;
       const sequence = ++renderSequence;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      if (currentStep.id === "sprite-fill") {
+      if (currentStep.id === "weather") {
+        for (const cell of currentCells) {
+          if (sequence !== renderSequence) return;
+          await drawWeatherCell(cell, currentStep);
+        }
+      } else if (currentStep.id === "sprite-fill") {
         for (const cell of currentCells) {
           if (sequence !== renderSequence) return;
           await drawSpriteCell(cell, currentStep);
@@ -1850,8 +2058,10 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
         }
       }
       if (sequence !== renderSequence) return;
-      drawRaisedRimOverlay(currentCells);
-      drawHoverLevelOverlay(currentCells);
+      if (currentStep.id === "land-levels" || currentStep.id === "sprite-fill") {
+        drawRaisedRimOverlay(currentCells);
+        drawHoverLevelOverlay(currentCells);
+      }
     }
 
     async function showStep(index) {
@@ -1859,14 +2069,17 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       const step = DATA.debug.steps[index];
       currentStep = step;
       currentCells = drawOrder(step.cells);
-      const visualEdges = visualEdgesFor(currentCells);
+      const visualEdges = step.id === "land-levels" ? visualEdgesFor(currentCells) : { cellLookup: new Map(), edges: [] };
       currentCellLookup = visualEdges.cellLookup;
       currentVisualEdges = visualEdges.edges;
       hoveredCellKey = null;
       title.textContent = step.title;
       stepSeed.textContent = \`Step seed: \${step.seed}\`;
       description.textContent = step.description;
-      if (step.id === "sprite-fill") {
+      weatherPanel.classList.toggle("visible", step.id === "weather");
+      if (step.id === "weather") {
+        await Promise.all(currentCells.filter((cell) => cell.weather).map((cell) => preloadWeatherSprite(cell)));
+      } else if (step.id === "sprite-fill") {
         await Promise.all(currentCells.map((cell) => preloadCellSprites(cell)));
       }
       await renderCurrentStep();
@@ -1896,7 +2109,9 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       button.addEventListener("click", () => showStep(index));
       nav.appendChild(button);
     });
-    showStep(0);
+    const requestedStep = params.get("step");
+    const initialStepIndex = Math.max(0, DATA.debug.steps.findIndex((step) => step.id === requestedStep));
+    showStep(initialStepIndex);
   </script>
 </body>
 </html>`;
