@@ -61,6 +61,9 @@ function weatherTypeParam(value: string | null): WeatherType | undefined {
 function generateDebugHtml(url: URL): string {
   const seed = intParam(url.searchParams.get("seed"), 12345);
   const weatherType = weatherTypeParam(url.searchParams.get("weatherType"));
+  const weatherCoverageLimit = url.searchParams.has("weatherCoverageLimit")
+    ? floatParam(url.searchParams.get("weatherCoverageLimit"), 0.035)
+    : undefined;
   const options: GenerateMapOptions = {
     width: intParam(url.searchParams.get("width"), DEFAULT_DEBUG_WIDTH),
     height: intParam(url.searchParams.get("height"), DEFAULT_DEBUG_HEIGHT),
@@ -70,7 +73,7 @@ function generateDebugHtml(url: URL): string {
     roadDensity: floatParam(url.searchParams.get("roadDensity"), 0.09642857142857142),
     blockedSeaRatio: floatParam(url.searchParams.get("blockedSeaRatio"), 0.2),
     blockedLandRatio: floatParam(url.searchParams.get("blockedLandRatio"), 0.1),
-    weatherCoverageLimit: floatParam(url.searchParams.get("weatherCoverageLimit"), 0.25),
+    ...(weatherCoverageLimit !== undefined ? { weatherCoverageLimit } : {}),
     ...(weatherType ? { weatherType } : {}),
     debug: true,
   };
