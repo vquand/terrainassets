@@ -146,7 +146,7 @@ export interface GenerateMapOptions {
   readonly blockedSeaRatio?: number;
   /** Fraction of land cells that become blocked cliffs/mountains. Default 0.1. */
   readonly blockedLandRatio?: number;
-  /** Maximum special-weather surface coverage, as a fraction of total cells. Default 0.25. */
+  /** Maximum special-weather surface coverage, as a fraction of total cells. Default 0.035. */
   readonly weatherCoverageLimit?: number;
   /** Optional debug/test override. When set, weather generation uses only this overlay type. */
   readonly weatherType?: WeatherType;
@@ -367,6 +367,7 @@ const DEFAULT_SEA_RATIO = 0.3;
 const DEFAULT_BLOCKED_SEA_RATIO = 0.2;
 const DEFAULT_BLOCKED_LAND_RATIO = 0.1;
 const DEFAULT_ROAD_DENSITY = 0.09642857142857142;
+const DEFAULT_WEATHER_COVERAGE_LIMIT = 0.035;
 
 function canHostWeather(layer: number): boolean {
   return layer !== -9 && layer !== 9;
@@ -425,7 +426,7 @@ function resolveGenerateMapOptions(
     roadDensity: clamp01(raw?.roadDensity ?? DEFAULT_ROAD_DENSITY),
     blockedSeaRatio: clamp01(raw?.blockedSeaRatio ?? DEFAULT_BLOCKED_SEA_RATIO),
     blockedLandRatio: clamp01(raw?.blockedLandRatio ?? DEFAULT_BLOCKED_LAND_RATIO),
-    weatherCoverageLimit: clamp01(raw?.weatherCoverageLimit ?? 0.25),
+    weatherCoverageLimit: clamp01(raw?.weatherCoverageLimit ?? DEFAULT_WEATHER_COVERAGE_LIMIT),
     ...(raw?.weatherType ? { weatherType: raw.weatherType } : {}),
     seeds: deriveSeeds(seed, raw?.seeds),
     debug: raw?.debug ?? false,
@@ -761,7 +762,7 @@ function fillWeather(
     }
   }
 
-  const targetWeatherCells = Math.floor(candidates.length * coverageLimit);
+  const targetWeatherCells = Math.min(candidates.length, Math.floor(width * height * coverageLimit));
   for (const i of weatherRng.shuffle(candidates).slice(0, targetWeatherCells)) {
     const col = i % width;
     const row = Math.floor(i / width);
