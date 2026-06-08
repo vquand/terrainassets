@@ -462,6 +462,34 @@ function isRoadPassableLayer(layer: number): boolean {
   return layer >= 1 && layer < 9;
 }
 
+function isShallowWaterCell(layer: number, terrain: string): boolean {
+  return layer === -1 || terrain === "SHALLOW_WATER" || terrain === "RIVER" || terrain === "LAKE";
+}
+
+function isWaterCell(layer: number, terrain: string): boolean {
+  return layer < 0 || terrain === "SHALLOW_WATER" || terrain === "SEA" || terrain === "RIVER" || terrain === "LAKE";
+}
+
+function isDeepSeaCell(layer: number, terrain: string): boolean {
+  return layer === -9 || terrain === "SEA";
+}
+
+function isMountainOrCliffCell(layer: number, terrain: string): boolean {
+  return layer === 9 || terrain === "MOUNTAIN";
+}
+
+function isVolcanoCell(terrain: string): boolean {
+  return terrain === "VOLCANO";
+}
+
+function isCemetaryCell(terrain: string): boolean {
+  return terrain === "CEMETARY" || terrain === "CEMETERY";
+}
+
+function isEvilBeingCell(terrain: string): boolean {
+  return terrain === "EVIL_BEING" || terrain === "EVIL_BEINGS";
+}
+
 /** Build a shaped, hex-adjacent path from the left edge to the right edge. */
 function buildPath(width: number, height: number, startRow: number, endRow: number, shape: ShapeFn): Hex[] {
   const minRow = 1;
@@ -718,18 +746,70 @@ function fillWeather(
         "EVIL_BURNING_GROUND",
       ];
 
+  const weatherTypesForCell = (col: number, row: number): WeatherType[] => {
+    const i = idxOf(width, col, row);
+    return weatherTypesForLayer(layer[i]!, types).filter((type) =>
+      canHostWeatherTypeAt(state, hex(col, row), type),
+    );
+  };
+
   const candidates: number[] = [];
   for (let row = 0; row < height; row++) {
     for (let col = 0; col < width; col++) {
       const i = idxOf(width, col, row);
-      if (weatherTypesForLayer(layer[i]!, types).length > 0 && !weather[i]) candidates.push(i);
+      if (weatherTypesForCell(col, row).length > 0 && !weather[i]) candidates.push(i);
     }
   }
 
   const targetWeatherCells = Math.floor(candidates.length * coverageLimit);
   for (const i of weatherRng.shuffle(candidates).slice(0, targetWeatherCells)) {
-    weather[i] = weatherRng.pick(weatherTypesForLayer(layer[i]!, types));
+    const col = i % width;
+    const row = Math.floor(i / width);
+    weather[i] = weatherRng.pick(weatherTypesForCell(col, row));
   }
+}
+
+function canHostWeatherTypeAt(state: MapGenerationState, cell: Hex, type: WeatherType): boolean {
+  const i = idxOf(state.width, cell.col, cell.row);
+  if (!canHostWeatherType(state.layer[i]!, type)) return false;
+
+  switch (type) {
+    case "BURNING_GROUND":
+      return hasNeighborMatching(state, cell, (layer, terrain) => isVolcanoCell(terrain));
+    case "DEADLY_TORNADO":
+      return hasNeighborMatching(state, cell, (layer, terrain, key) =>
+        state.roadConnections.has(key) || isMountainOrCliffCell(layer, terrain),
+      );
+    case "EVIL_BURNING_GROUND":
+      return hasNeighborMatching(state, cell, (layer, terrain) =>
+        isCemetaryCell(terrain) || isEvilBeingCell(terrain),
+      );
+    case "RAIN":
+      return isShallowWaterCell(state.layer[i]!, state.terrain[i]!) ||
+        hasNeighborMatching(state, cell, (layer, terrain) => isShallowWaterCell(layer, terrain));
+    case "STORM":
+      return hasNeighborMatching(state, cell, (layer, terrain) => isDeepSeaCell(layer, terrain));
+    case "TORNADO": {
+      const nearWater = hasNeighborMatching(state, cell, (layer, terrain) => isWaterCell(layer, terrain));
+      const nearMountain = hasNeighborMatching(state, cell, (layer, terrain) =>
+        isMountainOrCliffCell(layer, terrain),
+      );
+      return nearWater && nearMountain;
+    }
+  }
+}
+
+function hasNeighborMatching(
+  state: MapGenerationState,
+  cell: Hex,
+  predicate: (layer: number, terrain: string, key: string) => boolean,
+): boolean {
+  for (const n of neighbors(cell)) {
+    if (!inBoundsOf(state.width, state.height, n.col, n.row)) continue;
+    const i = idxOf(state.width, n.col, n.row);
+    if (predicate(state.layer[i]!, state.terrain[i]!, hexKey(n))) return true;
+  }
+  return false;
 }
 
 function canRoadStep(state: MapGenerationState, from: Hex, to: Hex): boolean {
@@ -1150,14 +1230,6 @@ export function generateMap(
     "Land stage: walkable land uses three named height levels by default: plain (layer 1), hill (layer 2), and plateau (layer 3). Blocked cliffs or mountains use layer 9.",
     seeds.land,
   );
-  fillWeather(state, seeds.weather, weatherCoverageLimit, weatherType);
-  captureDebugStep(
-    state,
-    "weather",
-    "Weather",
-    "Weather stage: special weather overlays can appear on land and shallow sea, capped by the configured surface coverage limit.",
-    seeds.weather,
-  );
   const targetRoadTiles = Math.round(countLandTiles(state) * roadDensity);
   const paths = drawRoads(state);
   const idx = (col: number, row: number) => idxOf(width, col, row);
@@ -1212,6 +1284,15 @@ export function generateMap(
     seeds.road,
   );
   const roadTiles = buildRoadTiles(state);
+  fillWeather(state, seeds.weather, weatherCoverageLimit, weatherType);
+  captureDebugStep(
+    state,
+    "weather",
+    "Weather",
+    "Weather stage: special weather overlays use terrain and road adjacency restrictions, capped by the configured surface coverage limit.",
+    seeds.weather,
+    roadTiles,
+  );
   captureDebugStep(
     state,
     "sprite-fill",
