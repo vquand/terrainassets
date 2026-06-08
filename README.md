@@ -64,7 +64,7 @@ The current source game links `sprites/terrain` into
 - Sea coverage: `30%` of total map cells
 - Blocked sea coverage: `20%` of sea cells
 - Blocked land coverage: `10%` of land cells
-- Weather coverage cap: `0.25` of total map cells
+- Weather coverage cap: `0.035` of total map cells
 
 The legacy-compatible call shape still works:
 
@@ -84,7 +84,7 @@ const map = generateMap(12345, {
   topology: "full",
   tileShape: "hex",
   roadDensity: 0.0964285714,
-  weatherCoverageLimit: 0.2,
+  weatherCoverageLimit: 0.035,
   debug: true,
 });
 ```
@@ -119,15 +119,9 @@ per-stage seeds unless a caller passes explicit seed overrides.
    selected as land, not `10%` of the whole map. If the topology contains no
    land, this stage has no effect.
 
-4. Weather
+4. Roads
 
-   The weather seed places special weather overlays. By default, weather cannot
-   cover more than `25%` of the total surface area. Callers can change this with
-   `weatherCoverageLimit`.
-
-5. Roads
-
-   Roads are generated on land after terrain and weather. A road can only move
+   Roads are generated on land after terrain layers. A road can only move
    between walkable land cells, and each step may change by at most one layer:
    `1` to `2`, `2` to `1`, `2` to `3`, or `3` to `2` are valid. Roads cannot
    move to layer `9`, layer `-9`, or sea. Roads are one tile wide; generation
@@ -136,6 +130,24 @@ per-stage seeds unless a caller passes explicit seed overrides.
    default is 1.5 times the density produced by the reference seed
    `ratio=1600779894`, `sea=1557164007`, `land=1924685185`,
    `weather=825734366`, `road=891917556` at `80 x 40`.
+
+5. Weather
+
+   The weather seed places special weather overlays after roads are available,
+   so road-aware weather can be constrained by road adjacency. By default,
+   weather cannot cover more than `3.5%` of the total surface area. Callers can
+   change this with `weatherCoverageLimit`.
+
+   Weather placement is also restricted by local terrain context:
+
+   - `BURNING_GROUND` requires an adjacent `VOLCANO` terrain cell.
+   - `EVIL_BURNING_GROUND` requires an adjacent `CEMETARY`, `CEMETERY`,
+     `EVIL_BEING`, or `EVIL_BEINGS` terrain cell. These are future-content
+     hooks, so this weather type is not emitted by the default terrain set.
+   - `RAIN` must be on or near shallow water, river, or lake.
+   - `STORM` must be near deep sea.
+   - `TORNADO` must be near water and near blocked mountains or cliffs.
+   - `DEADLY_TORNADO` must be near roads, blocked mountains, or cliffs.
 
 6. Sprite fill
 
@@ -180,7 +192,7 @@ Open `http://localhost:5999` to inspect the staged generation output. Query
 parameters can override generation inputs, for example:
 
 ```text
-http://localhost:5999/?seed=12345&width=120&height=60&depth=4&topology=full&tileShape=hex&roadDensity=0.0964285714&blockedSeaRatio=0.2&blockedLandRatio=0.1&weatherCoverageLimit=0.25
+http://localhost:5999/?seed=12345&width=120&height=60&depth=4&topology=full&tileShape=hex&roadDensity=0.0964285714&blockedSeaRatio=0.2&blockedLandRatio=0.1&weatherCoverageLimit=0.035
 ```
 
 The debug page displays the root seed, every per-step derived seed, and the seed
@@ -194,3 +206,5 @@ because the brown elevated wall already communicates that drop, and the brown
 wall itself is not highlighted. Hovering a land tile highlights precomputed
 visible boundary edges for the contiguous land area at that same layer,
 including visible front cliff edges where raised land drops to a lower level.
+If `weatherCoverageLimit` is omitted from the URL, the debug server uses the
+same weather coverage default as `generateMap`.
