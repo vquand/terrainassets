@@ -74,12 +74,12 @@ Map generation should only emit weather types with matching files in this folder
 
 | Asset | Status | Current path | Target path | Notes |
 |---|---|---|---|---|
-| `rain` | Present | `sprites/weather/rain.png` | `sprites/weather/rain.png` | Movement/visibility penalty candidate. |
-| `storm` | Present | `sprites/weather/storm.png` | `sprites/weather/storm.png` | Storm cloud overlay with lightning. |
-| `tornado` | Present | `sprites/weather/tornado.png` | `sprites/weather/tornado.png` | Tornado hazard overlay. |
-| `deadly-tornado` | Present | `sprites/weather/deadly-tornado.png` | `sprites/weather/deadly-tornado.png` | Severe tornado hazard overlay. |
-| `burning-ground` | Present | `sprites/weather/burning-ground.png` | `sprites/weather/burning-ground.png` | Fire ground-effect overlay. |
-| `evil-burning-ground` | Present | `sprites/weather/evil-burning-ground.png` | `sprites/weather/evil-burning-ground.png` | Corrupted fire ground-effect overlay. |
+| `rain` | Present | `sprites/weather/rain.png` | `sprites/weather/rain.png` | Movement/visibility penalty candidate. Generated on or near shallow water, river, or lake. |
+| `storm` | Present | `sprites/weather/storm.png` | `sprites/weather/storm.png` | Storm cloud overlay with lightning. Generated near deep sea. |
+| `tornado` | Present | `sprites/weather/tornado.png` | `sprites/weather/tornado.png` | Tornado hazard overlay. Generated near both water and blocked mountains/cliffs. |
+| `deadly-tornado` | Present | `sprites/weather/deadly-tornado.png` | `sprites/weather/deadly-tornado.png` | Severe tornado hazard overlay. Generated near roads, blocked mountains, or cliffs. |
+| `burning-ground` | Present | `sprites/weather/burning-ground.png` | `sprites/weather/burning-ground.png` | Fire ground-effect overlay. Generated only near `VOLCANO` terrain. |
+| `evil-burning-ground` | Present | `sprites/weather/evil-burning-ground.png` | `sprites/weather/evil-burning-ground.png` | Corrupted fire ground-effect overlay. Future-content hook generated only near `CEMETARY`/`CEMETERY` or `EVIL_BEING(S)` terrain. |
 | `snow` | Needs decision | `sprites/terrain/snow.png` | `sprites/weather/snow.png` | Move if weather overlay; otherwise rename terrain to `snowfield.png`. |
 | `fog` | Missing | N/A | `sprites/weather/fog.png` | Visibility penalty candidate. |
 | `sandstorm` | Missing | N/A | `sprites/weather/sandstorm.png` | Desert weather candidate. |
