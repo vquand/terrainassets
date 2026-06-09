@@ -113,9 +113,7 @@ per-stage seeds unless a caller passes explicit seed overrides.
    The land seed assigns land cells to walkable layers and blocked terrain.
    Default depth `4` produces walkable land layers `1`, `2`, and `3`, plus layer
    `9` for non-walkable cliffs or high mountains. The three walkable land
-   heights are named in the generated cell data as `plain` (layer `1`, đồng
-   bằng), `hill` (layer `2`, trung du đồi núi), and `plateau` (layer `3`, cao
-   nguyên). By default, blocked land covers `10%` of cells that were already
+   heights are named in the generated cell data as `plain` (layer `1`), `hill` (layer `2`), and `plateau` (layer `3`). By default, blocked land covers `10%` of cells that were already
    selected as land, not `10%` of the whole map. If the topology contains no
    land, this stage has no effect.
 
