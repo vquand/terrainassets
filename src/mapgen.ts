@@ -4,16 +4,16 @@
 //  - Fully deterministic: the legacy used Lua's global `math.random` for path
 //    widening and feature placement, so a seed did NOT reproduce a map. Here
 //    every random choice goes through one seeded `Rng`.
-//  - Paths are hex-adjacent BY CONSTRUCTION (shape waypoints joined with
-//    `hexLine`), so the legacy `pathValidator` repair pass is unnecessary.
-//  - Produces a per-hex `elevation` tier (gameplay-affecting, per the design)
+//  - Paths are grid-adjacent BY CONSTRUCTION (shape waypoints joined with
+//    tile-shape-aware lines), so the legacy `pathValidator` repair pass is unnecessary.
+//  - Produces a per-cell `elevation` tier (gameplay-affecting, per the design)
 //    — the legacy computed a height field only to pick terrain, then dropped it.
 //
 // The sin-hash noise is ported verbatim; it is deterministic under V8 (which
 // is the only engine we target: browser, Electron, Node).
 
 import { Rng } from "./rng.js";
-import { hex, hexDistance, hexesInRange, hexKey, hexLine, neighbor, neighbors, type Hex } from "./hex.js";
+import { hex, hexDistance, hexKey, hexLine, neighbor, neighbors, type Hex } from "./hex.js";
 
 export type RoadVariant =
   | "straight"
@@ -108,12 +108,13 @@ export interface RoadTile {
   readonly variant: RoadVariant;
   /** Baked rotation asset suffix: `variant-r${rotation}`. */
   readonly rotation: number;
-  /** Neighbor directions this visual road connects to: 0=E, 1=NE, 2=NW, 3=W, 4=SW, 5=SE. */
+  /** Neighbor directions this visual road connects to. Hex maps to 0=E, 1=NE, 2=NW, 3=W, 4=SW, 5=SE. Square maps use 0=E, 1=N, 3=W, 4=S. */
   readonly connections: readonly RoadDir[];
 }
 
 export type TopologyMode = "full" | "land" | "sea";
 export type TileShape = "hex" | "square";
+export type SpriteTheme = string;
 export type LandHeight = "plain" | "hill" | "plateau";
 export type WeatherType =
   | "RAIN"
@@ -140,6 +141,8 @@ export interface GenerateMapOptions {
   readonly topology?: TopologyMode;
   /** Debug/render tile geometry. Default hex. */
   readonly tileShape?: TileShape;
+  /** Sprite theme folder under sprites/themes. Default default. */
+  readonly spriteTheme?: SpriteTheme;
   /** Target road-overlay tiles divided by total land tiles. Default 0.0964285714. */
   readonly roadDensity?: number;
   /** Fraction of sea cells that become blocked deep sea. Default 0.2. */
@@ -179,6 +182,7 @@ export interface MapGenerationDebug {
   readonly seeds: LayerSeeds;
   readonly seaRatio: number;
   readonly tileShape: TileShape;
+  readonly spriteTheme: SpriteTheme;
   readonly steps: readonly MapGenerationDebugStep[];
 }
 
@@ -214,6 +218,7 @@ export interface GameMap {
   readonly depth: number;
   readonly topology: TopologyMode;
   readonly tileShape: TileShape;
+  readonly spriteTheme: SpriteTheme;
   readonly roadDensity: number;
   /** Scenario preset id when the map came from a hand-authored layout. */
   readonly preset?: string;
@@ -221,7 +226,7 @@ export interface GameMap {
   readonly height: number;
   /** Cells in row-major order: index = row * width + col. */
   readonly cells: readonly MapCell[];
-  /** Every generated route, hex-adjacent. */
+  /** Every generated route, adjacent according to `tileShape`. */
   readonly paths: readonly (readonly Hex[])[];
   /** The route enemies follow — `paths[0]`. */
   readonly mainPath: readonly Hex[];
@@ -383,12 +388,37 @@ function weatherTypesForLayer(layer: number, types: readonly WeatherType[]): Wea
   return types.filter((type) => canHostWeatherType(layer, type));
 }
 
+function normalizeTopology(value: TopologyMode | undefined): TopologyMode {
+  return value === "land" || value === "sea" || value === "full" ? value : "full";
+}
+
+function normalizeTileShape(value: TileShape | undefined): TileShape {
+  return value === "square" || value === "hex" ? value : "hex";
+}
+
+function normalizeSpriteTheme(value: SpriteTheme | undefined): SpriteTheme {
+  if (!value) return "default";
+  return /^[a-z0-9_-]+$/i.test(value) ? value : "default";
+}
+
+function normalizeWeatherType(value: WeatherType | undefined): WeatherType | undefined {
+  return value === "RAIN" ||
+    value === "STORM" ||
+    value === "TORNADO" ||
+    value === "DEADLY_TORNADO" ||
+    value === "BURNING_GROUND" ||
+    value === "EVIL_BURNING_GROUND"
+    ? value
+    : undefined;
+}
+
 interface ResolvedGenerateMapOptions {
   readonly width: number;
   readonly height: number;
   readonly depth: number;
   readonly topology: TopologyMode;
   readonly tileShape: TileShape;
+  readonly spriteTheme: SpriteTheme;
   readonly roadDensity: number;
   readonly blockedSeaRatio: number;
   readonly blockedLandRatio: number;
@@ -417,17 +447,19 @@ function resolveGenerateMapOptions(
 ): ResolvedGenerateMapOptions {
   const raw = typeof widthOrOptions === "object" ? widthOrOptions : options;
   const width = typeof widthOrOptions === "number" ? widthOrOptions : raw?.width ?? 1000;
+  const weatherType = normalizeWeatherType(raw?.weatherType);
   return {
     width: Math.max(1, Math.round(width)),
     height: Math.max(1, Math.round(height ?? raw?.height ?? 500)),
     depth: Math.max(2, Math.round(raw?.depth ?? 4)),
-    topology: raw?.topology ?? "full",
-    tileShape: raw?.tileShape ?? "hex",
+    topology: normalizeTopology(raw?.topology),
+    tileShape: normalizeTileShape(raw?.tileShape),
+    spriteTheme: normalizeSpriteTheme(raw?.spriteTheme),
     roadDensity: clamp01(raw?.roadDensity ?? DEFAULT_ROAD_DENSITY),
     blockedSeaRatio: clamp01(raw?.blockedSeaRatio ?? DEFAULT_BLOCKED_SEA_RATIO),
     blockedLandRatio: clamp01(raw?.blockedLandRatio ?? DEFAULT_BLOCKED_LAND_RATIO),
     weatherCoverageLimit: clamp01(raw?.weatherCoverageLimit ?? DEFAULT_WEATHER_COVERAGE_LIMIT),
-    ...(raw?.weatherType ? { weatherType: raw.weatherType } : {}),
+    ...(weatherType !== undefined ? { weatherType } : {}),
     seeds: deriveSeeds(seed, raw?.seeds),
     debug: raw?.debug ?? false,
   };
@@ -491,8 +523,76 @@ function isEvilBeingCell(terrain: string): boolean {
   return terrain === "EVIL_BEING" || terrain === "EVIL_BEINGS";
 }
 
-/** Build a shaped, hex-adjacent path from the left edge to the right edge. */
-function buildPath(width: number, height: number, startRow: number, endRow: number, shape: ShapeFn): Hex[] {
+const SQUARE_DIRECTIONS: readonly { readonly roadDir: RoadDir; readonly col: number; readonly row: number }[] = [
+  { roadDir: RoadDir.E, col: 1, row: 0 },
+  { roadDir: RoadDir.NE, col: 0, row: -1 },
+  { roadDir: RoadDir.W, col: -1, row: 0 },
+  { roadDir: RoadDir.SW, col: 0, row: 1 },
+];
+
+function squareNeighbors(cell: Hex): Hex[] {
+  return SQUARE_DIRECTIONS.map((d) => hex(cell.col + d.col, cell.row + d.row));
+}
+
+function squareDirectionBetween(from: Hex, to: Hex): RoadDir | undefined {
+  const colDelta = to.col - from.col;
+  const rowDelta = to.row - from.row;
+  return SQUARE_DIRECTIONS.find((d) => d.col === colDelta && d.row === rowDelta)?.roadDir;
+}
+
+function squareDistance(a: Hex, b: Hex): number {
+  return Math.abs(a.col - b.col) + Math.abs(a.row - b.row);
+}
+
+function squareLine(a: Hex, b: Hex): Hex[] {
+  const out: Hex[] = [hex(a.col, a.row)];
+  let col = a.col;
+  let row = a.row;
+  while (col !== b.col || row !== b.row) {
+    const colDistance = Math.abs(b.col - col);
+    const rowDistance = Math.abs(b.row - row);
+    if (colDistance >= rowDistance && col !== b.col) {
+      col += Math.sign(b.col - col);
+    } else if (row !== b.row) {
+      row += Math.sign(b.row - row);
+    } else {
+      col += Math.sign(b.col - col);
+    }
+    out.push(hex(col, row));
+  }
+  return out;
+}
+
+function gridNeighborsForShape(tileShape: TileShape, cell: Hex): Hex[] {
+  return tileShape === "square" ? squareNeighbors(cell) : neighbors(cell);
+}
+
+function gridLineForShape(tileShape: TileShape, a: Hex, b: Hex): Hex[] {
+  return tileShape === "square" ? squareLine(a, b) : hexLine(a, b);
+}
+
+function gridDistanceForShape(tileShape: TileShape, a: Hex, b: Hex): number {
+  return tileShape === "square" ? squareDistance(a, b) : hexDistance(a, b);
+}
+
+function directionBetweenForShape(tileShape: TileShape, from: Hex, to: Hex): number | undefined {
+  if (tileShape === "square") return squareDirectionBetween(from, to);
+  for (let dir = 0; dir < 6; dir++) {
+    const n = neighbor(from, dir);
+    if (n.col === to.col && n.row === to.row) return dir;
+  }
+  return undefined;
+}
+
+/** Build a shaped, adjacent path from the left edge to the right edge. */
+function buildPath(
+  tileShape: TileShape,
+  width: number,
+  height: number,
+  startRow: number,
+  endRow: number,
+  shape: ShapeFn,
+): Hex[] {
   const minRow = 1;
   const maxRow = height - 2;
   // One waypoint per column, following the shape.
@@ -501,20 +601,20 @@ function buildPath(width: number, height: number, startRow: number, endRow: numb
     const row = clampInt(shape(col, 0, width - 1, startRow, endRow), minRow, maxRow);
     waypoints.push(hex(col, row));
   }
-  // Join waypoints with hex lines — guarantees adjacency.
+  // Join waypoints with grid lines — guarantees adjacency for the selected tile shape.
   const path: Hex[] = [waypoints[0]!];
   for (let i = 1; i < waypoints.length; i++) {
-    const seg = hexLine(waypoints[i - 1]!, waypoints[i]!);
+    const seg = gridLineForShape(tileShape, waypoints[i - 1]!, waypoints[i]!);
     for (let j = 1; j < seg.length; j++) path.push(seg[j]!);
   }
   return path;
 }
 
-function joinWaypoints(points: readonly Hex[]): Hex[] {
+function joinWaypoints(tileShape: TileShape, points: readonly Hex[]): Hex[] {
   if (points.length === 0) return [];
   const out: Hex[] = [points[0]!];
   for (let i = 1; i < points.length; i++) {
-    const seg = hexLine(points[i - 1]!, points[i]!);
+    const seg = gridLineForShape(tileShape, points[i - 1]!, points[i]!);
     for (let j = 1; j < seg.length; j++) out.push(seg[j]!);
   }
   return out;
@@ -523,6 +623,7 @@ function joinWaypoints(points: readonly Hex[]): Hex[] {
 interface MapGenerationState {
   readonly rng: Rng;
   readonly roadNoiseSeed: number;
+  readonly tileShape: TileShape;
   readonly width: number;
   readonly height: number;
   readonly terrain: string[];
@@ -566,8 +667,8 @@ function captureDebugStep(
 }
 
 function connectRoad(state: MapGenerationState, a: Hex, b: Hex): void {
-  const aDir = directionBetween(a, b);
-  const bDir = directionBetween(b, a);
+  const aDir = gridDirectionBetween(state, a, b);
+  const bDir = gridDirectionBetween(state, b, a);
   if (aDir === undefined || bDir === undefined) return;
   const aKey = hexKey(a);
   const bKey = hexKey(b);
@@ -579,12 +680,20 @@ function connectRoad(state: MapGenerationState, a: Hex, b: Hex): void {
   state.roadConnections.set(bKey, bSet);
 }
 
-function directionBetween(from: Hex, to: Hex): number | undefined {
-  for (let dir = 0; dir < 6; dir++) {
-    const n = neighbor(from, dir);
-    if (n.col === to.col && n.row === to.row) return dir;
-  }
-  return undefined;
+function gridDirectionBetween(state: MapGenerationState, from: Hex, to: Hex): number | undefined {
+  return directionBetweenForShape(state.tileShape, from, to);
+}
+
+function gridNeighbors(state: MapGenerationState, cell: Hex): Hex[] {
+  return gridNeighborsForShape(state.tileShape, cell);
+}
+
+function gridLine(state: MapGenerationState, a: Hex, b: Hex): Hex[] {
+  return gridLineForShape(state.tileShape, a, b);
+}
+
+function gridDistance(state: MapGenerationState, a: Hex, b: Hex): number {
+  return gridDistanceForShape(state.tileShape, a, b);
 }
 
 function addRoadPath(state: MapGenerationState, path: readonly Hex[]): void {
@@ -805,7 +914,7 @@ function hasNeighborMatching(
   cell: Hex,
   predicate: (layer: number, terrain: string, key: string) => boolean,
 ): boolean {
-  for (const n of neighbors(cell)) {
+  for (const n of gridNeighbors(state, cell)) {
     if (!inBoundsOf(state.width, state.height, n.col, n.row)) continue;
     const i = idxOf(state.width, n.col, n.row);
     if (predicate(state.layer[i]!, state.terrain[i]!, hexKey(n))) return true;
@@ -822,7 +931,7 @@ function canRoadStep(state: MapGenerationState, from: Hex, to: Hex): boolean {
 
 function roadFeatureAffinity(state: MapGenerationState, cell: Hex): number {
   let affinity = 0;
-  for (const n of neighbors(cell)) {
+  for (const n of gridNeighbors(state, cell)) {
     if (!inBoundsOf(state.width, state.height, n.col, n.row)) continue;
     const i = idxOf(state.width, n.col, n.row);
     const terrain = state.terrain[i]!;
@@ -843,8 +952,8 @@ function roadStepCost(state: MapGenerationState, from: Hex, to: Hex, previous: H
   cost -= roadFeatureAffinity(state, to);
   if (terrain === "GRASSLAND" && roadFeatureAffinity(state, to) === 0) cost += 1.2;
   if (previous) {
-    const prevDir = directionBetween(previous, from);
-    const nextDir = directionBetween(from, to);
+    const prevDir = gridDirectionBetween(state, previous, from);
+    const nextDir = gridDirectionBetween(state, from, to);
     if (prevDir !== undefined && nextDir !== undefined) {
       if (prevDir === nextDir) cost += 2.4;
       else if (Math.abs(prevDir - nextDir) === 3) cost += 4;
@@ -869,7 +978,7 @@ function findRoadPath(state: MapGenerationState, start: Hex, end: Hex): Hex[] {
     if (cur.col === end.col && cur.row === end.row) break;
     const curKey = hexKey(cur);
     const previous = cameFrom.get(curKey) ?? undefined;
-    const nextCells = neighbors(cur).sort((a, b) => roadStepCost(state, cur, a, previous ?? undefined, end) - roadStepCost(state, cur, b, previous ?? undefined, end));
+    const nextCells = gridNeighbors(state, cur).sort((a, b) => roadStepCost(state, cur, a, previous ?? undefined, end) - roadStepCost(state, cur, b, previous ?? undefined, end));
     for (const next of nextCells) {
       const key = hexKey(next);
       if (!canRoadStep(state, cur, next)) continue;
@@ -877,7 +986,7 @@ function findRoadPath(state: MapGenerationState, start: Hex, end: Hex): Hex[] {
       if (costSoFar.has(key) && newCost >= costSoFar.get(key)!) continue;
       costSoFar.set(key, newCost);
       cameFrom.set(key, cur);
-      queue.push({ cell: next, priority: newCost + hexDistance(next, end) * 7 });
+      queue.push({ cell: next, priority: newCost + gridDistance(state, next, end) * 7 });
     }
   }
 
@@ -942,7 +1051,7 @@ function drawRoads(state: MapGenerationState): Hex[][] {
     const pa = a.find((c) => Math.abs(c.col - col) <= 1);
     const pb = b.find((c) => Math.abs(c.col - col) <= 1);
     if (!pa || !pb) continue;
-    const connector = hexLine(pa, pb).filter((cell) => {
+    const connector = gridLine(state, pa, pb).filter((cell) => {
       if (!inBoundsOf(width, height, cell.col, cell.row)) return false;
       return isRoadPassableLayer(layer[idxOf(width, cell.col, cell.row)]!);
     });
@@ -996,7 +1105,7 @@ function drawPortalRoads(state: MapGenerationState, portals: readonly Portal[], 
     }
 
     waypoints.push(capitol);
-    const road = joinWaypoints(waypoints);
+    const road = joinWaypoints(state.tileShape, waypoints);
     addRoadPath(state, road);
     roads.push(road);
   }
@@ -1137,14 +1246,14 @@ function buildRoadTiles(state: MapGenerationState): Map<string, RoadTile> {
   return out;
 }
 
-export function roadTilesForPaths(paths: readonly (readonly Hex[])[]): Map<string, RoadTile> {
+export function roadTilesForPaths(paths: readonly (readonly Hex[])[], tileShape: TileShape = "hex"): Map<string, RoadTile> {
   const connections = new Map<string, Set<number>>();
   for (const path of paths) {
     for (let i = 1; i < path.length; i++) {
       const prev = path[i - 1]!;
       const cell = path[i]!;
-      const prevDir = directionBetween(prev, cell);
-      const cellDir = directionBetween(cell, prev);
+      const prevDir = directionBetweenForShape(tileShape, prev, cell);
+      const cellDir = directionBetweenForShape(tileShape, cell, prev);
       if (prevDir === undefined || cellDir === undefined) continue;
       const prevKey = hexKey(prev);
       const cellKey = hexKey(cell);
@@ -1181,6 +1290,7 @@ export function generateMap(
     depth,
     topology,
     tileShape,
+    spriteTheme,
     roadDensity,
     blockedSeaRatio,
     blockedLandRatio,
@@ -1199,6 +1309,7 @@ export function generateMap(
   const state: MapGenerationState = {
     rng,
     roadNoiseSeed: seeds.road,
+    tileShape,
     width,
     height: mapHeight,
     terrain,
@@ -1245,7 +1356,7 @@ export function generateMap(
   // Bridges where the route runs alongside water.
   for (let i = 1; i < mainPath.length - 1; i++) {
     const cell = mainPath[i]!;
-    const nearWater = neighbors(cell).some(
+    const nearWater = gridNeighbors(state, cell).some(
       (n) => inBounds(n.col, n.row) && isWater(layer[idx(n.col, n.row)]!),
     );
     if (nearWater && rng.next() < 0.3) {
@@ -1262,7 +1373,7 @@ export function generateMap(
       (pt) => Math.abs(pt.col - cx) <= 3 && Math.abs(pt.row - cy) <= 2,
     );
     if (!nearPath) continue;
-    for (const n of [hex(cx, cy), ...neighbors(hex(cx, cy))]) {
+    for (const n of [hex(cx, cy), ...gridNeighbors(state, hex(cx, cy))]) {
       if (!inBounds(n.col, n.row)) continue;
       const t = terrain[idx(n.col, n.row)]!;
       if (isRoadPassableLayer(layer[idx(n.col, n.row)]!) && t !== "ROCK_ROAD" && rng.next() < 0.8) {
@@ -1271,7 +1382,7 @@ export function generateMap(
     }
   }
 
-  // Portals: 2–4 edge spawn points, deterministic from `rng`. Min 4-hex
+  // Portals: 2–4 edge spawn points, deterministic from `rng`. Min 4-cell
   // separation so they're visibly distinct.
   const portals = generatePortals(rng, width, mapHeight, layer, idx);
   const portalRoads = drawPortalRoads(state, portals, mainPath[mainPath.length - 1]!);
@@ -1341,6 +1452,7 @@ export function generateMap(
     depth,
     topology,
     tileShape,
+    spriteTheme,
     roadDensity,
     width,
     height: mapHeight,
@@ -1350,7 +1462,7 @@ export function generateMap(
     spawn: mainPath[0]!,
     capitol: mainPath[mainPath.length - 1]!,
     portals,
-    ...(debugSteps ? { debug: { seeds, seaRatio, tileShape, steps: debugSteps } } : {}),
+    ...(debugSteps ? { debug: { seeds, seaRatio, tileShape, spriteTheme, steps: debugSteps } } : {}),
   };
 }
 
@@ -1398,12 +1510,13 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     .meta { color: #52606d; font-size: 13px; }
     .seed-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .seed-list span, .step-seed { display: inline-block; padding: 3px 6px; border-radius: 4px; background: #eef2f6; color: #334e68; font-size: 12px; }
-    .weather-panel { display: none; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; margin: 0 0 12px; border: 1px solid #d8dee4; border-radius: 6px; background: #fff; }
-    .weather-panel.visible { display: flex; }
-    .weather-panel label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #334e68; }
-    .weather-panel select, .weather-panel input { min-height: 34px; }
-    .weather-panel input[type="range"] { width: 170px; }
-    .weather-density-value { min-width: 44px; font-size: 13px; color: #52606d; }
+    .control-panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; padding: 12px; margin: 0 0 14px; border: 1px solid #d8dee4; border-radius: 6px; background: #fff; }
+    .control-panel label { display: grid; gap: 4px; font-size: 12px; color: #334e68; }
+    .control-panel input, .control-panel select { width: 100%; box-sizing: border-box; min-height: 34px; border: 1px solid #c8d0d9; border-radius: 5px; padding: 6px 8px; background: #fff; color: #1f2933; }
+    .control-panel input[type="range"] { padding: 0; }
+    .control-actions { display: flex; align-items: flex-end; gap: 8px; }
+    .control-actions button { width: 100%; font-weight: 600; }
+    .weather-density-value { min-height: 16px; font-size: 12px; color: #52606d; }
   </style>
 </head>
 <body>
@@ -1433,7 +1546,54 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       <h1 id="title"></h1>
       <div class="step-seed" id="stepSeed"></div>
       <p id="description"></p>
-      <div class="weather-panel" id="weatherPanel">
+      <div class="control-panel" id="controlPanel">
+        <label>
+          Seed
+          <input id="seedInput" type="number" min="1" step="1">
+        </label>
+        <label>
+          Width
+          <input id="widthInput" type="number" min="1" step="1">
+        </label>
+        <label>
+          Height
+          <input id="heightInput" type="number" min="1" step="1">
+        </label>
+        <label>
+          Depth
+          <input id="depthInput" type="number" min="2" step="1">
+        </label>
+        <label>
+          Topology
+          <select id="topologySelect">
+            <option value="full">Full</option>
+            <option value="land">Land</option>
+            <option value="sea">Sea</option>
+          </select>
+        </label>
+        <label>
+          Shape
+          <select id="tileShapeSelect">
+            <option value="hex">Hex</option>
+            <option value="square">Square</option>
+          </select>
+        </label>
+        <label>
+          Theme
+          <input id="spriteThemeInput" type="text" pattern="[A-Za-z0-9_-]+" spellcheck="false">
+        </label>
+        <label>
+          Road density
+          <input id="roadDensityInput" type="number" min="0" max="1" step="0.001">
+        </label>
+        <label>
+          Blocked sea
+          <input id="blockedSeaRatioInput" type="number" min="0" max="1" step="0.01">
+        </label>
+        <label>
+          Blocked land
+          <input id="blockedLandRatioInput" type="number" min="0" max="1" step="0.01">
+        </label>
         <label>
           Weather
           <select id="weatherTypeSelect">
@@ -1449,9 +1609,11 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
         <label>
           Density
           <input id="weatherDensity" type="range" min="0" max="1" step="0.01">
+          <span class="weather-density-value" id="weatherDensityValue"></span>
         </label>
-        <span class="weather-density-value" id="weatherDensityValue"></span>
-        <button type="button" id="applyWeatherTest">Apply</button>
+        <div class="control-actions">
+          <button type="button" id="applyParameters">Apply</button>
+        </div>
       </div>
       <div class="viewport">
         <canvas id="map"></canvas>
@@ -1494,14 +1656,24 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     const rerollNav = document.getElementById("rerollNav");
     const title = document.getElementById("title");
     const description = document.getElementById("description");
-    const weatherPanel = document.getElementById("weatherPanel");
+    const seedInput = document.getElementById("seedInput");
+    const widthInput = document.getElementById("widthInput");
+    const heightInput = document.getElementById("heightInput");
+    const depthInput = document.getElementById("depthInput");
+    const topologySelect = document.getElementById("topologySelect");
+    const tileShapeSelect = document.getElementById("tileShapeSelect");
+    const spriteThemeInput = document.getElementById("spriteThemeInput");
+    const roadDensityInput = document.getElementById("roadDensityInput");
+    const blockedSeaRatioInput = document.getElementById("blockedSeaRatioInput");
+    const blockedLandRatioInput = document.getElementById("blockedLandRatioInput");
     const weatherTypeSelect = document.getElementById("weatherTypeSelect");
     const weatherDensity = document.getElementById("weatherDensity");
     const weatherDensityValue = document.getElementById("weatherDensityValue");
-    const applyWeatherTest = document.getElementById("applyWeatherTest");
+    const applyParameters = document.getElementById("applyParameters");
     const canvas = document.getElementById("map");
     const ctx = canvas.getContext("2d");
     const tileShape = DATA.debug.tileShape ?? "hex";
+    const spriteTheme = DATA.debug.spriteTheme ?? "default";
     let zoomMode = "fit";
     let activeStepIndex = 0;
     let hexRadius = 1;
@@ -1536,6 +1708,16 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     configureCanvas();
     const params = new URLSearchParams(window.location.search);
     const rootSeed = params.get("seed") ?? "12345";
+    seedInput.value = rootSeed;
+    widthInput.value = params.get("width") ?? String(DATA.width);
+    heightInput.value = params.get("height") ?? String(DATA.height);
+    depthInput.value = params.get("depth") ?? "4";
+    topologySelect.value = params.get("topology") ?? "full";
+    tileShapeSelect.value = tileShape;
+    spriteThemeInput.value = spriteTheme;
+    roadDensityInput.value = params.get("roadDensity") ?? "0.0964285714";
+    blockedSeaRatioInput.value = params.get("blockedSeaRatio") ?? "0.2";
+    blockedLandRatioInput.value = params.get("blockedLandRatio") ?? "0.1";
     const weatherTypes = new Set([
       "RAIN",
       "STORM",
@@ -1546,13 +1728,13 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     ]);
     const initialWeatherType = params.get("weatherType");
     if (weatherTypes.has(initialWeatherType)) weatherTypeSelect.value = initialWeatherType;
-    const initialWeatherDensity = Math.max(0, Math.min(1, Number.parseFloat(params.get("weatherCoverageLimit") ?? "0.25")));
-    weatherDensity.value = Number.isFinite(initialWeatherDensity) ? String(initialWeatherDensity) : "0.25";
+    const initialWeatherDensity = Math.max(0, Math.min(1, Number.parseFloat(params.get("weatherCoverageLimit") ?? "0.035")));
+    weatherDensity.value = Number.isFinite(initialWeatherDensity) ? String(initialWeatherDensity) : "0.035";
     function updateWeatherDensityValue() {
       weatherDensityValue.textContent = \`\${Math.round(Number(weatherDensity.value) * 100)}%\`;
     }
     updateWeatherDensityValue();
-    meta.textContent = \`Root seed \${rootSeed} | Shape \${tileShape} | Sea ratio \${Math.round(DATA.debug.seaRatio * 100)}% | Size \${DATA.width} x \${DATA.height}\`;
+    meta.textContent = \`Root seed \${rootSeed} | Theme \${spriteTheme} | Shape \${tileShape} | Sea ratio \${Math.round(DATA.debug.seaRatio * 100)}% | Size \${DATA.width} x \${DATA.height}\`;
     for (const [name, value] of Object.entries(DATA.debug.seeds)) {
       const item = document.createElement("span");
       item.textContent = \`\${name}: \${value}\`;
@@ -1574,14 +1756,32 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     reroll.addEventListener("click", rerollSeed);
     rerollNav.addEventListener("click", rerollSeed);
     weatherDensity.addEventListener("input", updateWeatherDensityValue);
-    applyWeatherTest.addEventListener("click", () => {
+    function setParamFromInput(name, input) {
+      const value = input.value.trim();
+      if (value === "") params.delete(name);
+      else params.set(name, value);
+    }
+
+    function applyCurrentParameters() {
+      setParamFromInput("seed", seedInput);
+      setParamFromInput("width", widthInput);
+      setParamFromInput("height", heightInput);
+      setParamFromInput("depth", depthInput);
+      params.set("topology", topologySelect.value);
+      params.set("tileShape", tileShapeSelect.value);
+      setParamFromInput("spriteTheme", spriteThemeInput);
+      setParamFromInput("roadDensity", roadDensityInput);
+      setParamFromInput("blockedSeaRatio", blockedSeaRatioInput);
+      setParamFromInput("blockedLandRatio", blockedLandRatioInput);
       const selectedWeather = weatherTypeSelect.value;
       if (weatherTypes.has(selectedWeather)) params.set("weatherType", selectedWeather);
       else params.delete("weatherType");
       params.set("weatherCoverageLimit", String(Number(weatherDensity.value)));
-      params.set("step", "weather");
+      params.set("step", currentStep?.id ?? "ratio");
       window.location.search = params.toString();
-    });
+    }
+
+    applyParameters.addEventListener("click", applyCurrentParameters);
     zoomToggle.addEventListener("click", () => {
       zoomMode = zoomMode === "fit" ? "tile30" : "fit";
       zoomToggle.textContent = zoomMode === "fit" ? "Zoom: Fit" : "Zoom: 60px";
@@ -1615,45 +1815,55 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       return colors.GRASSLAND;
     }
 
-    const terrainSpritePathByCode = {
-      BRIDGE: "/sprites/terrain/simplified/bridge.png",
-      DESERT: "/sprites/terrain/simplified/desert.png",
-      FOREST: "/sprites/terrain/simplified/forest.png",
-      GRASSLAND: "/sprites/terrain/simplified/grassland.png",
-      LAKE: "/sprites/terrain/simplified/lake.png",
-      MOUNTAIN: "/sprites/terrain/simplified/mountain.png",
-      RIVER: "/sprites/terrain/simplified/river.png",
-      ROCK_ROAD: "/sprites/terrain/simplified/rock-road.png",
-      RUINS: "/sprites/terrain/simplified/ruins.png",
-      SEA: "/sprites/terrain/simplified/sea.png",
-      SHALLOW_WATER: "/sprites/terrain/simplified/shallow-water.png",
-      SNOW: "/sprites/terrain/simplified/snow.png",
-      STORM: "/sprites/terrain/simplified/storm.png",
-      SWAMP: "/sprites/terrain/simplified/swamp.png",
-      VOLCANO: "/sprites/terrain/simplified/volcano.png"
+    const themeShapeRoot = \`/sprites/themes/\${encodeURIComponent(spriteTheme)}/\${tileShape}\`;
+    const terrainSpriteFileByCode = {
+      BRIDGE: "bridge.png",
+      DESERT: "desert.png",
+      FOREST: "forest.png",
+      GRASSLAND: "grassland.png",
+      LAKE: "lake.png",
+      MOUNTAIN: "mountain.png",
+      RIVER: "river.png",
+      ROCK_ROAD: "rock-road.png",
+      RUINS: "ruins.png",
+      SEA: "sea.png",
+      SHALLOW_WATER: "shallow-water.png",
+      SNOW: "snow.png",
+      STORM: "storm.png",
+      SWAMP: "swamp.png",
+      VOLCANO: "volcano.png"
     };
 
-    const weatherSpritePathByType = {
-      RAIN: "/sprites/weather/rain.png",
-      STORM: "/sprites/weather/storm.png",
-      TORNADO: "/sprites/weather/tornado.png",
-      DEADLY_TORNADO: "/sprites/weather/deadly-tornado.png",
-      BURNING_GROUND: "/sprites/weather/burning-ground.png",
-      EVIL_BURNING_GROUND: "/sprites/weather/evil-burning-ground.png"
+    const weatherSpriteFileByType = {
+      RAIN: "rain.png",
+      STORM: "storm.png",
+      TORNADO: "tornado.png",
+      DEADLY_TORNADO: "deadly-tornado.png",
+      BURNING_GROUND: "burning-ground.png",
+      EVIL_BURNING_GROUND: "evil-burning-ground.png"
     };
 
-    function spritePathFor(cell) {
-      return terrainSpritePathByCode[cell.terrain] ?? null;
+    function spriteCandidates(primaryPath, legacyPath) {
+      return primaryPath === legacyPath ? [primaryPath] : [primaryPath, legacyPath];
     }
 
-    function weatherSpritePathFor(cell) {
-      if (!cell.weather) return null;
-      return weatherSpritePathByType[cell.weather] ?? null;
+    function spritePathsFor(cell) {
+      const file = terrainSpriteFileByCode[cell.terrain];
+      if (!file) return [];
+      return spriteCandidates(\`\${themeShapeRoot}/terrain/simplified/\${file}\`, \`/sprites/terrain/simplified/\${file}\`);
     }
 
-    function roadSpritePathFor(cell) {
-      if (!cell.roadTile) return null;
-      return \`/sprites/roads/rock-road/\${cell.roadTile.variant}-r\${cell.roadTile.rotation}.png\`;
+    function weatherSpritePathsFor(cell) {
+      if (!cell.weather) return [];
+      const file = weatherSpriteFileByType[cell.weather];
+      if (!file) return [];
+      return spriteCandidates(\`\${themeShapeRoot}/weather/\${file}\`, \`/sprites/weather/\${file}\`);
+    }
+
+    function roadSpritePathsFor(cell) {
+      if (!cell.roadTile) return [];
+      const file = \`\${cell.roadTile.variant}-r\${cell.roadTile.rotation}.png\`;
+      return spriteCandidates(\`\${themeShapeRoot}/roads/rock-road/\${file}\`, \`/sprites/roads/rock-road/\${file}\`);
     }
 
     const spriteCache = new Map();
@@ -1668,6 +1878,14 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       });
       spriteCache.set(src, cached);
       return cached;
+    }
+
+    async function loadFirstSprite(sources) {
+      for (const src of sources) {
+        const image = await loadSprite(src);
+        if (image) return image;
+      }
+      return null;
     }
 
     function elevationOffsetY(cell) {
@@ -1742,6 +1960,12 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
     }
 
     function neighborCoords(cell, dir) {
+      if (tileShape === "square") {
+        if (dir === 0) return { col: cell.col + 1, row: cell.row };
+        if (dir === 1) return { col: cell.col, row: cell.row - 1 };
+        if (dir === 3) return { col: cell.col - 1, row: cell.row };
+        return { col: cell.col, row: cell.row + 1 };
+      }
       const odd = cell.row & 1;
       if (dir === 0) return { col: cell.col + 1, row: cell.row };
       if (dir === 1) return { col: cell.col + odd, row: cell.row - 1 };
@@ -1749,6 +1973,10 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       if (dir === 3) return { col: cell.col - 1, row: cell.row };
       if (dir === 4) return { col: cell.col - 1 + odd, row: cell.row + 1 };
       return { col: cell.col + odd, row: cell.row + 1 };
+    }
+
+    function gridDirs() {
+      return tileShape === "square" ? [0, 1, 3, 4] : [0, 1, 2, 3, 4, 5];
     }
 
     function isLowerLandNeighbor(cell, dir, cellLookup) {
@@ -1759,7 +1987,8 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
 
     function raisedBorderDirs(cell, cellLookup) {
       if (!hasRaisedLand(cell)) return [];
-      return [0, 1, 2, 3].filter((dir) => isLowerLandNeighbor(cell, dir, cellLookup));
+      const dirs = tileShape === "square" ? [0, 1, 3, 4] : [0, 1, 2, 3];
+      return dirs.filter((dir) => isLowerLandNeighbor(cell, dir, cellLookup));
     }
 
     function drawHexRaisedBorder(cell, yOffset, dirs) {
@@ -1824,10 +2053,23 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       ctx.lineWidth = lineWidth;
       ctx.shadowColor = "rgba(58, 37, 18, 0.45)";
       ctx.shadowBlur = Math.max(1, Math.round(squareSize * 0.04));
-      ctx.beginPath();
-      ctx.moveTo(x, y - lineWidth * 0.65);
-      ctx.lineTo(x + squareSize, y - lineWidth * 0.65);
-      ctx.stroke();
+      for (const dir of dirs) {
+        ctx.beginPath();
+        if (dir === 0) {
+          ctx.moveTo(x + squareSize, y);
+          ctx.lineTo(x + squareSize, y + squareSize);
+        } else if (dir === 1) {
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + squareSize, y);
+        } else if (dir === 3) {
+          ctx.moveTo(x, y);
+          ctx.lineTo(x, y + squareSize);
+        } else {
+          ctx.moveTo(x, y + squareSize);
+          ctx.lineTo(x + squareSize, y + squareSize);
+        }
+        ctx.stroke();
+      }
       ctx.restore();
     }
 
@@ -1854,18 +2096,14 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
 
     async function preloadCellSprites(cell) {
       const sources = [];
-      const basePath = spritePathFor(cell);
-      const weatherPath = weatherSpritePathFor(cell);
-      const roadPath = roadSpritePathFor(cell);
-      if (basePath) sources.push(basePath);
-      if (weatherPath) sources.push(weatherPath);
-      if (roadPath) sources.push(roadPath);
+      sources.push(...spritePathsFor(cell));
+      sources.push(...weatherSpritePathsFor(cell));
+      sources.push(...roadSpritePathsFor(cell));
       await Promise.all(sources.map((src) => loadSprite(src)));
     }
 
     async function preloadWeatherSprite(cell) {
-      const weatherPath = weatherSpritePathFor(cell);
-      if (weatherPath) await loadSprite(weatherPath);
+      await Promise.all(weatherSpritePathsFor(cell).map((src) => loadSprite(src)));
     }
 
     function drawCellImage(cell, yOffset, image, scale = 1) {
@@ -1893,8 +2131,7 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       const yOffset = elevationOffsetY(cell);
       if (tileShape === "hex") drawHexSideWall(cell, yOffset);
       else drawSquareSideWall(cell, yOffset);
-      const basePath = spritePathFor(cell);
-      const baseImage = basePath ? await loadSprite(basePath) : null;
+      const baseImage = await loadFirstSprite(spritePathsFor(cell));
       if (!baseImage) {
         const color = colorFor(cell, step);
         if (tileShape === "hex") drawHexCell(cell, color, yOffset);
@@ -1903,17 +2140,11 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
         drawCellImage(cell, yOffset, baseImage);
       }
 
-      const roadPath = roadSpritePathFor(cell);
-      if (roadPath) {
-        const roadImage = await loadSprite(roadPath);
-        if (roadImage) drawCellImage(cell, yOffset, roadImage);
-      }
+      const roadImage = await loadFirstSprite(roadSpritePathsFor(cell));
+      if (roadImage) drawCellImage(cell, yOffset, roadImage);
 
-      const weatherPath = weatherSpritePathFor(cell);
-      if (weatherPath) {
-        const weatherImage = await loadSprite(weatherPath);
-        if (weatherImage) drawCellImage(cell, yOffset, weatherImage, 0.8);
-      }
+      const weatherImage = await loadFirstSprite(weatherSpritePathsFor(cell));
+      if (weatherImage) drawCellImage(cell, yOffset, weatherImage, 0.8);
     }
 
     async function drawWeatherCell(cell, step) {
@@ -1922,9 +2153,7 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       if (tileShape === "hex") drawHexCell(cell, color, yOffset);
       else drawSquareCell(cell, color, yOffset);
 
-      const weatherPath = weatherSpritePathFor(cell);
-      if (!weatherPath) return;
-      const weatherImage = await loadSprite(weatherPath);
+      const weatherImage = await loadFirstSprite(weatherSpritePathsFor(cell));
       if (weatherImage) drawCellImage(cell, yOffset, weatherImage, 0.8);
     }
 
@@ -1957,7 +2186,7 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       component.add(cellKey(start.col, start.row));
       for (let index = 0; index < queue.length; index++) {
         const cell = queue[index];
-        for (let dir = 0; dir < 6; dir++) {
+        for (const dir of gridDirs()) {
           const n = neighborCoords(cell, dir);
           const key = cellKey(n.col, n.row);
           if (component.has(key)) continue;
@@ -2008,7 +2237,7 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       for (const cell of cells) {
         if (!isInspectableLand(cell)) continue;
         const key = cellKey(cell.col, cell.row);
-        for (let dir = 0; dir < 6; dir++) {
+        for (const dir of gridDirs()) {
           const n = neighborCoords(cell, dir);
           const neighborKey = cellKey(n.col, n.row);
           const neighbor = cellLookup.get(neighborKey);
@@ -2158,7 +2387,6 @@ export function renderMapGenerationDebugHtml(map: Pick<GameMap, "width" | "heigh
       title.textContent = step.title;
       stepSeed.textContent = \`Step seed: \${step.seed}\`;
       description.textContent = step.description;
-      weatherPanel.classList.toggle("visible", step.id === "weather");
       if (step.id === "weather") {
         await Promise.all(currentCells.filter((cell) => cell.weather).map((cell) => preloadWeatherSprite(cell)));
       } else if (step.id === "sprite-fill") {
