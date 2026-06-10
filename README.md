@@ -1,7 +1,7 @@
 # terrainassets
 
 Reusable terrain sprites and deterministic terrain-generation utilities for
-hex-based strategy games.
+tile-based strategy games.
 
 ## Purpose
 
@@ -34,11 +34,21 @@ src/
 input/                  gitignored raw sprite sheets and temporary inputs
 output/                 gitignored splitter output and intermediate files
 sprites/
-  terrain/              terrain tile sprites
-    simplified/         simplified terrain tile set
-  weather/              weather and hazard overlay sprites
-  roads/                road overlay sprites
-    rock-road/          connected road tile variants
+  themes/
+    default/
+      hex/              default hex-shaped sprite set
+        terrain/
+          simplified/   simplified terrain tile set
+        weather/        weather and hazard overlay sprites
+        roads/
+          rock-road/    connected road tile variants
+      square/           default square-shaped sprite set
+        terrain/
+        weather/
+        roads/
+  terrain/              legacy terrain sprite paths
+  weather/              legacy weather sprite paths
+  roads/                legacy road sprite paths
 tools/
   split/                sprite sheet splitting helpers
 ```
@@ -60,11 +70,16 @@ The current source game links `sprites/terrain` into
 - Depth: `4`
 - Topology: `full` sea, land, and weather
 - Tile shape: `hex`
+- Sprite theme: `default`
 - Road density: `0.0964285714` road tiles per land tile
 - Sea coverage: `30%` of total map cells
 - Blocked sea coverage: `20%` of sea cells
 - Blocked land coverage: `10%` of land cells
 - Weather coverage cap: `0.035` of total map cells
+
+The generator can render debug output as either a pointy-top hexagonal map or a
+square map. Hex remains the default for backwards compatibility; pass
+`tileShape: "square"` to validate square-map presentation.
 
 The legacy-compatible call shape still works:
 
@@ -83,11 +98,65 @@ const map = generateMap(12345, {
   depth: 4,
   topology: "full",
   tileShape: "hex",
+  spriteTheme: "default",
   roadDensity: 0.0964285714,
   weatherCoverageLimit: 0.035,
   debug: true,
 });
 ```
+
+## Square map requirement and parameter plan
+
+As-is, terrain generation is documented and primarily exercised as a hexagonal
+map. To-be, the same generated terrain data must also support square-map
+debugging and presentation.
+
+The canonical public option is `tileShape`, accepted by `generateMap` as:
+
+- `tileShape: "hex"` for the existing pointy-top odd-r hex presentation.
+- `tileShape: "square"` for square tile presentation and square-grid
+  generation rules.
+
+Square maps use the same row-major `{ col, row }` cell coordinates as hex maps,
+but generation uses four-way cardinal adjacency for roads, route paths,
+weather-neighbor checks, clearings, and debug hover inspection. The existing
+`hex` property on generated cells remains the coordinate field for backwards
+compatibility.
+
+Sprite selection is independent from generation shape. The canonical sprite
+lookup is:
+
+```text
+sprites/themes/{spriteTheme}/{tileShape}/{kind}/...
+```
+
+For the built-in theme this means:
+
+- Hex terrain: `sprites/themes/default/hex/terrain/simplified/grassland.png`
+- Square terrain: `sprites/themes/default/square/terrain/simplified/grassland.png`
+- Hex roads: `sprites/themes/default/hex/roads/rock-road/straight-r0.png`
+- Square roads: `sprites/themes/default/square/roads/rock-road/straight-r0.png`
+
+The debug renderer falls back to the legacy `sprites/terrain`,
+`sprites/weather`, and `sprites/roads` paths if a theme-specific asset is
+missing. New work should add assets under `sprites/themes`, not the legacy
+folders.
+
+Parameter handling should stay consistent across entry points:
+
+- API: use the options object, for example
+  `generateMap(seed, { width: 120, height: 60, tileShape: "square", spriteTheme: "default" })`.
+- Debug server URL: use query parameters that mirror option names, for example
+  `?seed=12345&width=120&height=60&tileShape=square&spriteTheme=default`.
+- Future CLI wrapper: use long flags with the same names, for example
+  `--seed 12345 --width 120 --height 60 --tileShape square --spriteTheme default`.
+
+Inputs are normalized at the boundary before generation. Integers are rounded
+and clamped to valid minimums by the generator. Ratios are clamped to `0..1`.
+Unknown enum values fall back to safe defaults: `topology=full`,
+`tileShape=hex`, `spriteTheme=default`, and mixed weather. Theme names should
+use only letters, numbers, `_`, or `-`. The debug server uses this same behavior
+for query parameters.
 
 ## Configurable layering requirement
 
@@ -150,10 +219,12 @@ per-stage seeds unless a caller passes explicit seed overrides.
 6. Sprite fill
 
    The final stage resolves the generated terrain codes and road overlays into
-   sprite-ready tile values and renders the PNG assets from `sprites/`. The
-   base terrain sprite is rendered first, then any road sprite from
-   `sprites/roads/rock-road` is rendered on top. The debug site can display
-   either pointy-top hex tiles or square tiles. Hex is the default shape.
+   sprite-ready tile values and renders the PNG assets from
+   `sprites/themes/{spriteTheme}/{tileShape}`. The base terrain sprite is
+   rendered first, then any road sprite from the matching `roads/rock-road`
+   folder is rendered on top. The debug site can display either pointy-top hex
+   tiles or square tiles. Hex is the default shape and `default` is the default
+   theme.
 
 ## Debug HTML
 
@@ -186,11 +257,13 @@ Or run it through Docker:
 docker compose -f docker-compose.debug.yml up --build
 ```
 
-Open `http://localhost:5999` to inspect the staged generation output. Query
-parameters can override generation inputs, for example:
+Open `http://localhost:5999` to inspect the staged generation output. The page
+includes parameter controls for seed, size, topology, tile shape, road density,
+blocked terrain ratios, and weather. Query parameters can also override
+generation inputs directly, for example:
 
 ```text
-http://localhost:5999/?seed=12345&width=120&height=60&depth=4&topology=full&tileShape=hex&roadDensity=0.0964285714&blockedSeaRatio=0.2&blockedLandRatio=0.1&weatherCoverageLimit=0.035
+http://localhost:5999/?seed=12345&width=120&height=60&depth=4&topology=full&tileShape=square&spriteTheme=default&roadDensity=0.0964285714&blockedSeaRatio=0.2&blockedLandRatio=0.1&weatherCoverageLimit=0.035
 ```
 
 The debug page displays the root seed, every per-step derived seed, and the seed

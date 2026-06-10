@@ -8,6 +8,7 @@ import {
   generateMap,
   renderMapGenerationDebugHtml,
   type GenerateMapOptions,
+  type SpriteTheme,
   type TileShape,
   type TopologyMode,
   type WeatherType,
@@ -47,6 +48,10 @@ function tileShapeParam(value: string | null): TileShape {
   return value === "square" || value === "hex" ? value : "hex";
 }
 
+function spriteThemeParam(value: string | null): SpriteTheme {
+  return value && /^[a-z0-9_-]+$/i.test(value) ? value : "default";
+}
+
 function weatherTypeParam(value: string | null): WeatherType | undefined {
   return value === "RAIN" ||
     value === "STORM" ||
@@ -70,6 +75,7 @@ function generateDebugHtml(url: URL): string {
     depth: intParam(url.searchParams.get("depth"), 4),
     topology: topologyParam(url.searchParams.get("topology")),
     tileShape: tileShapeParam(url.searchParams.get("tileShape")),
+    spriteTheme: spriteThemeParam(url.searchParams.get("spriteTheme")),
     roadDensity: floatParam(url.searchParams.get("roadDensity"), 0.09642857142857142),
     blockedSeaRatio: floatParam(url.searchParams.get("blockedSeaRatio"), 0.2),
     blockedLandRatio: floatParam(url.searchParams.get("blockedLandRatio"), 0.1),

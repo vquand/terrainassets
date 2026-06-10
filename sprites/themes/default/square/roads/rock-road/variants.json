@@ -1,0 +1,339 @@
+[
+  {
+    "name": "slight-side",
+    "source": "PENUP_20260531_204817.png",
+    "sourceIndex": 1,
+    "description": "Road bends slightly from the left edge toward the upper-right edge.",
+    "connections": [
+      "west",
+      "northeast"
+    ],
+    "rawSize": [
+      375,
+      430
+    ],
+    "tileSize": [
+      64,
+      74
+    ],
+    "publicPath": "apps/web/public/sprites/terrain/rock-road/slight-side.png",
+    "rotations": [
+      "apps/web/public/sprites/terrain/rock-road/slight-side-r0.png",
+      "apps/web/public/sprites/terrain/rock-road/slight-side-r1.png",
+      "apps/web/public/sprites/terrain/rock-road/slight-side-r2.png",
+      "apps/web/public/sprites/terrain/rock-road/slight-side-r3.png",
+      "apps/web/public/sprites/terrain/rock-road/slight-side-r4.png",
+      "apps/web/public/sprites/terrain/rock-road/slight-side-r5.png"
+    ]
+  },
+  {
+    "name": "straight",
+    "source": "PENUP_20260531_204817.png",
+    "sourceIndex": 2,
+    "description": "Road travels straight through the tile from left to right.",
+    "connections": [
+      "west",
+      "east"
+    ],
+    "rawSize": [
+      376,
+      430
+    ],
+    "tileSize": [
+      64,
+      74
+    ],
+    "publicPath": "apps/web/public/sprites/terrain/rock-road/straight.png",
+    "rotations": [
+      "apps/web/public/sprites/terrain/rock-road/straight-r0.png",
+      "apps/web/public/sprites/terrain/rock-road/straight-r1.png",
+      "apps/web/public/sprites/terrain/rock-road/straight-r2.png",
+      "apps/web/public/sprites/terrain/rock-road/straight-r3.png",
+      "apps/web/public/sprites/terrain/rock-road/straight-r4.png",
+      "apps/web/public/sprites/terrain/rock-road/straight-r5.png"
+    ]
+  },
+  {
+    "name": "dead-end",
+    "source": "PENUP_20260531_204817.png",
+    "sourceIndex": 3,
+    "description": "Road enters from the left and terminates at a rock blockage.",
+    "connections": [
+      "west"
+    ],
+    "rawSize": [
+      376,
+      430
+    ],
+    "tileSize": [
+      64,
+      74
+    ],
+    "publicPath": "apps/web/public/sprites/terrain/rock-road/dead-end.png",
+    "rotations": [
+      "apps/web/public/sprites/terrain/rock-road/dead-end-r0.png",
+      "apps/web/public/sprites/terrain/rock-road/dead-end-r1.png",
+      "apps/web/public/sprites/terrain/rock-road/dead-end-r2.png",
+      "apps/web/public/sprites/terrain/rock-road/dead-end-r3.png",
+      "apps/web/public/sprites/terrain/rock-road/dead-end-r4.png",
+      "apps/web/public/sprites/terrain/rock-road/dead-end-r5.png"
+    ]
+  },
+  {
+    "name": "turn-back",
+    "source": "PENUP_20260531_204817.png",
+    "sourceIndex": 4,
+    "description": "Road enters from the left and curls back toward the upper-left edge.",
+    "connections": [
+      "west",
+      "northwest"
+    ],
+    "rawSize": [
+      376,
+      430
+    ],
+    "tileSize": [
+      64,
+      74
+    ],
+    "publicPath": "apps/web/public/sprites/terrain/rock-road/turn-back.png",
+    "rotations": [
+      "apps/web/public/sprites/terrain/rock-road/turn-back-r0.png",
+      "apps/web/public/sprites/terrain/rock-road/turn-back-r1.png",
+      "apps/web/public/sprites/terrain/rock-road/turn-back-r2.png",
+      "apps/web/public/sprites/terrain/rock-road/turn-back-r3.png",
+      "apps/web/public/sprites/terrain/rock-road/turn-back-r4.png",
+      "apps/web/public/sprites/terrain/rock-road/turn-back-r5.png"
+    ]
+  },
+  {
+    "name": "three-adjacent",
+    "source": "PENUP_20260603_222850.png",
+    "sourceIndex": 1,
+    "description": "Three-way junction with three adjacent exits, based west/northwest/northeast.",
+    "connections": [
+      "west",
+      "northwest",
+      "northeast"
+    ],
+    "rawSize": [
+      378,
+      431
+    ],
+    "tileSize": [
+      64,
+      74
+    ],
+    "publicPath": "apps/web/public/sprites/terrain/rock-road/three-adjacent.png",
+    "rotations": [
+      "apps/web/public/sprites/terrain/rock-road/three-adjacent-r0.png",
+      "apps/web/public/sprites/terrain/rock-road/three-adjacent-r1.png",
+      "apps/web/public/sprites/terrain/rock-road/three-adjacent-r2.png",
+      "apps/web/public/sprites/terrain/rock-road/three-adjacent-r3.png",
+      "apps/web/public/sprites/terrain/rock-road/three-adjacent-r4.png",
+      "apps/web/public/sprites/terrain/rock-road/three-adjacent-r5.png"
+    ]
+  },
+  {
+    "name": "three-left-spread",
+    "source": "PENUP_20260603_222850.png",
+    "sourceIndex": 3,
+    "description": "Three-way junction with an asymmetric left spread, based west/east/northeast.",
+    "connections": [
+      "west",
+      "east",
+      "northeast"
+    ],
+    "rawSize": [
+      376,
+      431
+    ],
+    "tileSize": [
+      64,
+      74
+    ],
+    "publicPath": "apps/web/public/sprites/terrain/rock-road/three-left-spread.png",
+    "rotations": [
+      "apps/web/public/sprites/terrain/rock-road/three-left-spread-r0.png",
+      "apps/web/public/sprites/terrain/rock-road/three-left-spread-r1.png",
+      "apps/web/public/sprites/terrain/rock-road/three-left-spread-r2.png",
+      "apps/web/public/sprites/terrain/rock-road/three-left-spread-r3.png",
+      "apps/web/public/sprites/terrain/rock-road/three-left-spread-r4.png",
+      "apps/web/public/sprites/terrain/rock-road/three-left-spread-r5.png"
+    ]
+  },
+  {
+    "name": "three-right-spread",
+    "source": "PENUP_20260603_222850.png",
+    "sourceIndex": 2,
+    "mirrorOf": "three-left-spread",
+    "description": "Three-way junction with the mirrored asymmetric spread, based west/east/northwest.",
+    "connections": [
+      "west",
+      "east",
+      "northwest"
+    ],
+    "rawSize": [
+      376,
+      431
+    ],
+    "tileSize": [
+      64,
+      74
+    ],
+    "publicPath": "apps/web/public/sprites/terrain/rock-road/three-right-spread.png",
+    "rotations": [
+      "apps/web/public/sprites/terrain/rock-road/three-right-spread-r0.png",
+      "apps/web/public/sprites/terrain/rock-road/three-right-spread-r1.png",
+      "apps/web/public/sprites/terrain/rock-road/three-right-spread-r2.png",
+      "apps/web/public/sprites/terrain/rock-road/three-right-spread-r3.png",
+      "apps/web/public/sprites/terrain/rock-road/three-right-spread-r4.png",
+      "apps/web/public/sprites/terrain/rock-road/three-right-spread-r5.png"
+    ]
+  },
+  {
+    "name": "three-alternate",
+    "source": "PENUP_20260603_222850.png",
+    "sourceIndex": 2,
+    "description": "Three-way junction with evenly spaced exits, based west/northeast/southeast.",
+    "connections": [
+      "west",
+      "northeast",
+      "southeast"
+    ],
+    "rawSize": [
+      381,
+      430
+    ],
+    "tileSize": [
+      64,
+      74
+    ],
+    "publicPath": "apps/web/public/sprites/terrain/rock-road/three-alternate.png",
+    "rotations": [
+      "apps/web/public/sprites/terrain/rock-road/three-alternate-r0.png",
+      "apps/web/public/sprites/terrain/rock-road/three-alternate-r1.png",
+      "apps/web/public/sprites/terrain/rock-road/three-alternate-r2.png",
+      "apps/web/public/sprites/terrain/rock-road/three-alternate-r3.png",
+      "apps/web/public/sprites/terrain/rock-road/three-alternate-r4.png",
+      "apps/web/public/sprites/terrain/rock-road/three-alternate-r5.png"
+    ]
+  },
+  {
+    "name": "four-adjacent-gap",
+    "source": "PENUP_20260603_222741.png",
+    "sourceIndex": 3,
+    "description": "Four-way junction missing two adjacent exits, based northwest/west/southwest/southeast.",
+    "connections": [
+      "northwest",
+      "west",
+      "southwest",
+      "southeast"
+    ],
+    "rawSize": [
+      377,
+      430
+    ],
+    "tileSize": [
+      64,
+      74
+    ],
+    "publicPath": "apps/web/public/sprites/terrain/rock-road/four-adjacent-gap.png",
+    "rotations": [
+      "apps/web/public/sprites/terrain/rock-road/four-adjacent-gap-r0.png",
+      "apps/web/public/sprites/terrain/rock-road/four-adjacent-gap-r1.png",
+      "apps/web/public/sprites/terrain/rock-road/four-adjacent-gap-r2.png",
+      "apps/web/public/sprites/terrain/rock-road/four-adjacent-gap-r3.png",
+      "apps/web/public/sprites/terrain/rock-road/four-adjacent-gap-r4.png",
+      "apps/web/public/sprites/terrain/rock-road/four-adjacent-gap-r5.png"
+    ]
+  },
+  {
+    "name": "four-spread-gap",
+    "source": "PENUP_20260603_222741.png",
+    "sourceIndex": 1,
+    "description": "Four-way junction missing two separated exits, based northeast/west/southwest/southeast.",
+    "connections": [
+      "northeast",
+      "west",
+      "southwest",
+      "southeast"
+    ],
+    "rawSize": [
+      376,
+      430
+    ],
+    "tileSize": [
+      64,
+      74
+    ],
+    "publicPath": "apps/web/public/sprites/terrain/rock-road/four-spread-gap.png",
+    "rotations": [
+      "apps/web/public/sprites/terrain/rock-road/four-spread-gap-r0.png",
+      "apps/web/public/sprites/terrain/rock-road/four-spread-gap-r1.png",
+      "apps/web/public/sprites/terrain/rock-road/four-spread-gap-r2.png",
+      "apps/web/public/sprites/terrain/rock-road/four-spread-gap-r3.png",
+      "apps/web/public/sprites/terrain/rock-road/four-spread-gap-r4.png",
+      "apps/web/public/sprites/terrain/rock-road/four-spread-gap-r5.png"
+    ]
+  },
+  {
+    "name": "four-opposite-gap",
+    "source": "PENUP_20260603_222741.png",
+    "sourceIndex": 2,
+    "description": "Four-way X junction missing two opposite exits, based west/east/northeast/southwest.",
+    "connections": [
+      "west",
+      "east",
+      "northeast",
+      "southwest"
+    ],
+    "rawSize": [
+      376,
+      430
+    ],
+    "tileSize": [
+      64,
+      74
+    ],
+    "publicPath": "apps/web/public/sprites/terrain/rock-road/four-opposite-gap.png",
+    "rotations": [
+      "apps/web/public/sprites/terrain/rock-road/four-opposite-gap-r0.png",
+      "apps/web/public/sprites/terrain/rock-road/four-opposite-gap-r1.png",
+      "apps/web/public/sprites/terrain/rock-road/four-opposite-gap-r2.png",
+      "apps/web/public/sprites/terrain/rock-road/four-opposite-gap-r3.png",
+      "apps/web/public/sprites/terrain/rock-road/four-opposite-gap-r4.png",
+      "apps/web/public/sprites/terrain/rock-road/four-opposite-gap-r5.png"
+    ]
+  },
+  {
+    "name": "five-way",
+    "source": "PENUP_20260603_222741.png",
+    "sourceIndex": 4,
+    "description": "Five-way junction hub, based east/northeast/northwest/west/southwest.",
+    "connections": [
+      "east",
+      "northeast",
+      "northwest",
+      "west",
+      "southwest"
+    ],
+    "rawSize": [
+      379,
+      431
+    ],
+    "tileSize": [
+      64,
+      74
+    ],
+    "publicPath": "apps/web/public/sprites/terrain/rock-road/five-way.png",
+    "rotations": [
+      "apps/web/public/sprites/terrain/rock-road/five-way-r0.png",
+      "apps/web/public/sprites/terrain/rock-road/five-way-r1.png",
+      "apps/web/public/sprites/terrain/rock-road/five-way-r2.png",
+      "apps/web/public/sprites/terrain/rock-road/five-way-r3.png",
+      "apps/web/public/sprites/terrain/rock-road/five-way-r4.png",
+      "apps/web/public/sprites/terrain/rock-road/five-way-r5.png"
+    ]
+  }
+]

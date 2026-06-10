@@ -4,9 +4,13 @@ This file tracks terrain, weather, and road sprite coverage. The target layout i
 
 ```text
 sprites/
-  terrain/   base terrain tiles only
-  weather/   transparent weather/effect overlays
-  roads/     transparent road overlays and road variant metadata
+  themes/
+    default/
+      hex/     hex-shaped base tiles and overlays
+      square/  square-shaped base tiles and overlays
+  terrain/     legacy base terrain tiles
+  weather/     legacy transparent weather/effect overlays
+  roads/       legacy transparent road overlays and road variant metadata
 ```
 
 Status legend:
@@ -20,9 +24,32 @@ Status legend:
 
 | Folder | Status | Notes |
 |---|---|---|
-| `sprites/terrain/` | Present | Contains terrain sprites and weather-like sprites today. |
-| `sprites/weather/` | Present | Contains transparent weather/effect overlays. |
-| `sprites/roads/` | Present | Contains road overlays and road variant metadata. |
+| `sprites/themes/default/hex/` | Present | Canonical default hex-shaped sprite set. Seeded from the legacy assets. |
+| `sprites/themes/default/square/` | Present | Canonical default square-shaped sprite set. Seeded from the legacy assets until square-specific art is produced. |
+| `sprites/terrain/` | Legacy | Kept for existing consumers and debug fallback. |
+| `sprites/weather/` | Legacy | Kept for existing consumers and debug fallback. |
+| `sprites/roads/` | Legacy | Kept for existing consumers and debug fallback. |
+
+## Theme And Shape Naming
+
+Canonical sprite paths include both theme and tile shape:
+
+```text
+sprites/themes/{theme}/{shape}/terrain/simplified/{terrain}.png
+sprites/themes/{theme}/{shape}/weather/{weather}.png
+sprites/themes/{theme}/{shape}/roads/rock-road/{variant}-r{rotation}.png
+```
+
+Current supported values:
+
+- Theme: `default`
+- Shape: `hex`, `square`
+
+Future themes should create a new sibling folder under `sprites/themes`, for
+example `sprites/themes/winter/hex/...` and `sprites/themes/winter/square/...`.
+Do not encode theme or shape only in the filename. Prefer folder separation over
+names such as `road_rotation_1_hex.png`; the equivalent canonical path is
+`sprites/themes/default/hex/roads/rock-road/straight-r1.png`.
 
 ## Terrain Base Tiles
 
@@ -95,9 +122,9 @@ Road sprites should be transparent overlays in `sprites/roads/`, not terrain spr
 
 | Asset | Status | Current path | Target path | Notes |
 |---|---|---|---|---|
-| `rock-road.png` | Present | `sprites/roads/rock-road.png` | `sprites/roads/rock-road.png` | Single fallback road tile. |
-| `rock-road` variants | Present | `sprites/roads/rock-road/` | `sprites/roads/rock-road/` | Includes rotated connection variants and `variants.json`. |
-| `variants.json` | Present | `sprites/roads/rock-road/variants.json` | `sprites/roads/rock-road/variants.json` | Road lookup metadata. |
+| `rock-road.png` | Present | `sprites/roads/rock-road.png` | `sprites/themes/default/{hex,square}/roads/rock-road.png` | Single fallback road tile. |
+| `rock-road` variants | Present | `sprites/roads/rock-road/` | `sprites/themes/default/{hex,square}/roads/rock-road/` | Includes rotated connection variants and `variants.json`. |
+| `variants.json` | Present | `sprites/roads/rock-road/variants.json` | `sprites/themes/default/{hex,square}/roads/rock-road/variants.json` | Road lookup metadata. |
 
 ## Optional Transition Tiles
 
@@ -113,5 +140,6 @@ These are not required for version one, but they would improve map readability.
 
 ## Migration Tasks
 
-1. Decide whether `snow.png`, `swamp.png`, and `volcano.png` are terrain bases or weather overlays.
-2. Add remaining missing weather overlays as transparent sprites.
+1. Replace copied square placeholders under `sprites/themes/default/square/` with square-specific art.
+2. Decide whether `snow.png`, `swamp.png`, and `volcano.png` are terrain bases or weather overlays.
+3. Add remaining missing weather overlays as transparent sprites under both shape folders for each supported theme.
